@@ -137,6 +137,7 @@ export {
     type GooseConfig,
     type GooseDirs,
 } from "./client-config.js";
+import { conflictScanEnabled, scanClientPlugins } from "./thirdparty-scan.js";
 
 export const LAUNCHER_DEFAULT_HOST = "127.0.0.1";
 export const LAUNCH_CLIENTS = ["pi", "codex", "claude", "omp", "opencode", "hermes", "dsh", "codebuddy", "qoder", "trae", "jcode", "kimi", "gemini", "iflow", "qwen", "mcode", "aider", "copilot", "amp", "goose", "pi-test"] as const;
@@ -3152,6 +3153,22 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
     // routes from an old overlay's rewritten models.json/models.yml.
     const discoveryEnv =
         base === "pi" || base === "omp" ? { ...process.env, PI_CODING_AGENT_DIR: undefined } : process.env;
+    // #1206: surface co-resident third-party compression plugins BEFORE the
+    // first message — two compressors on one conversation double-compress and
+    // corrupt message refs, so warn at launch time, not after damage.
+    if (conflictScanEnabled(process.env)) {
+        try {
+            const scan = scanClientPlugins(base, { env: discoveryEnv, cwd: process.cwd() });
+            for (const f of scan.findings) {
+                const absorbed = base === "opencode" && f.knownId === "opencode-acp";
+                console.error(absorbed
+                    ? `bili: note: opencode-acp present (${f.entry}, ${f.source}) — kept by design for legacy-session absorption (#920); new sessions route through bili only.`
+                    : `bili: WARNING: co-resident compression plugin on ${base}: ${f.entry} (${f.source}). Two compressors on one conversation will double-compress and corrupt message refs (#1206) — disable the other plugin, or don't route this client through bili.`);
+            }
+        } catch {
+            // The scan is diagnostic only — never block client startup on it.
+        }
+    }
     const config = loadClientConfig(discoveryEnv, process.cwd());
     let routes = discoverRoutes(base, config);
     if (base === "aider") {

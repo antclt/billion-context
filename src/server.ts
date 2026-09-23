@@ -73,6 +73,8 @@ import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
 import { renderUI, handleConfigGet, handleConfigPut } from "./web/index.js";
 import { reapOrphanBlocks } from "./orphan-gc.js";
+import { conflictScanEnabled, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
+import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
 import { getStore } from "./persist.js";
 import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError } from "./logger.js";
 import { configFile, defaultLogFile, dumpsDir, stateDir } from "./paths.js";
@@ -1794,6 +1796,29 @@ async function handle(
             // pfa-* (printed in wire notes).
             recordPluginSession(claudeSub !== undefined ? conversation : (pluginConversation ?? conversation), session.id);
         }
+        // #1206: first request of this session — identify the client and scan
+        // its plugin registry for a co-resident THIRD-PARTY compression plugin
+        // (two compressors on one conversation double-compress and corrupt
+        // refs). Best-effort: any failure is logged once, never disturbs the
+        // request path. Findings land in the session conflict ledger so they
+        // stay visible in acp_status / web UI / stats for the whole session.
+        if (session.stats.requests === 0 && conflictScanEnabled(process.env)) {
+            try {
+                const client = pluginAgent ?? sniffScanClient(req.headers);
+                if (client !== undefined) {
+                    const res = scanClientPlugins(client, { env: process.env, cwd: process.cwd() });
+                    for (const f of res.findings) {
+                        const absorbed = f.client === "opencode" && f.knownId === "opencode-acp" && pluginAgent === "opencode";
+                        recordConflict(session, "third-party-plugin", `${f.client}: ${f.entry} (${f.source})${absorbed ? " — kept for legacy sessions by design (#920)" : ""}`);
+                        if (!absorbed) {
+                            log("warn", `[conflict] co-resident compression plugin detected on ${f.client}: ${f.entry} (${f.source}) — two compressors on one conversation will double-compress and corrupt message refs (#1206). Remove or disable the other plugin, or route this client exclusively through bili.`);
+                        }
+                    }
+                }
+            } catch (err) {
+                log("warn", `[conflict] third-party plugin scan failed: ${String(err)} (#1206)`);
+            }
+        }
         // Responses, OpenAI-chat AND Anthropic-wire clients that send their
         // own session id as `prompt_cache_key` (omp) get that conversation
         // recorded even WITHOUT the x-bili-plugin header, so the /acp command
@@ -2657,11 +2682,12 @@ async function prepareAnthropic(
             const rewrite = detectUnannouncedHistoryRewrite(session, knownRefsBefore, msgs.map((m) => m.id));
             if (rewrite.detected) {
                 log("warn", `[${sessionId}] unannounced client history rewrite detected (${rewrite.knownIncoming}/${rewrite.incomingTotal} incoming message(s) carry pre-turn refs of ${rewrite.knownBefore} known) — marking compaction boundary (#1001)`);
+                recordConflict(session, "unannounced-rewrite", `${rewrite.knownIncoming}/${rewrite.incomingTotal} incoming message(s) carry pre-turn refs of ${rewrite.knownBefore} known`);
                 markCompactionBoundary(session);
             }
         }
         applyCompactionArchive(session, activeBefore, new Set(msgs.map((m) => m.id)), log);
-        reapOrphanBlocks(session, msgs, deactivateBlock);
+        reapOrphansLogged(session, msgs, log, sessionId);
         // [#1095] downscale screenshot-like images ONCE at arrival (kernel routing
         // decision + recipe; originals cached for the image_full restore channel).
         // Deterministic encode ⇒ re-runs are byte-stable for the prefix cache.
@@ -2841,11 +2867,12 @@ async function prepareOpenai(
             const rewrite = detectUnannouncedHistoryRewrite(session, knownRefsBefore, msgs.map((m) => m.id));
             if (rewrite.detected) {
                 log("warn", `[${sessionId}] unannounced client history rewrite detected (${rewrite.knownIncoming}/${rewrite.incomingTotal} incoming message(s) carry pre-turn refs of ${rewrite.knownBefore} known) — marking compaction boundary (#1001)`);
+                recordConflict(session, "unannounced-rewrite", `${rewrite.knownIncoming}/${rewrite.incomingTotal} incoming message(s) carry pre-turn refs of ${rewrite.knownBefore} known`);
                 markCompactionBoundary(session);
             }
         }
         applyCompactionArchive(session, activeBefore, new Set(msgs.map((m) => m.id)), log);
-        reapOrphanBlocks(session, msgs, deactivateBlock);
+        reapOrphansLogged(session, msgs, log, sessionId);
         // [#1095] arrival-time image downscale (see prepareAnthropic) — one
         // deterministic encode per fingerprint; byte-stable re-runs.
         await applyImageCompressionPass(session, processedMessages as BiliMessage[], { config, billing: imageBillingFor(opts, billingUpstream ?? upstreamOrigin), log });
@@ -3051,7 +3078,7 @@ async function prepareGoogle(
         log("info", diagNudge(turn, sessionId, tokenCount, config.modelContextLimit, model, willInjectNudge));
         processedMessages = stripKernelSummaries(turn.messages, turn.state);
         applyCompactionArchive(session, activeBefore, new Set(msgs.map((m) => m.id)), log);
-        reapOrphanBlocks(session, msgs, deactivateBlock);
+        reapOrphansLogged(session, msgs, log, sessionId);
         // [#1095] arrival-time image downscale (see prepareAnthropic).
         await applyImageCompressionPass(session, processedMessages as BiliMessage[], { config, billing: imageBillingFor(opts, upstreamOrigin), log });
         rebuiltContents = coreToGoogle(processedMessages as BiliMessage[]);
@@ -3286,7 +3313,7 @@ async function prepareResponses(
         const willInjectNudge = opts.compress.injectNudge && !!turn.nudge && shouldInject && !isCompactionTrigger && (turn.nudge.shouldInject || emergencyNudge(turn.nudge));
         log("info", diagNudge(turn, sessionId, tokenCount, config.modelContextLimit, parsed.model, willInjectNudge));
         processedMessages = repairResponsesAssistantOrdering(stripReasoning(stripKernelSummaries(turn.messages, turn.state)), originalMessages);
-        reapOrphanBlocks(session, msgs, deactivateBlock);
+        reapOrphansLogged(session, msgs, log, sessionId);
         // [#1095] arrival-time image downscale (see prepareAnthropic).
         await applyImageCompressionPass(session, processedMessages as BiliMessage[], { config, billing: imageBillingFor(opts, billingUpstream ?? upstreamOrigin), log });
         rebuiltInput = patchResponsesInput(projection, processedMessages);
@@ -5380,8 +5407,20 @@ function sendCacheReport(res: http.ServerResponse, url: string): void {
     res.end(JSON.stringify({ reports: sessions.map((s) => ({ id: s.id, report: buildSessionCacheReport(s) })) }, null, 2));
 }
 
+// #1206: orphan reaping was silent — blocks deactivated because their source
+// messages vanished from client history are the strongest runtime signal that
+// something outside bili (client auto-compaction or another compression plugin)
+// rewrote the conversation. Log it and record it in the session ledger.
+function reapOrphansLogged(session: Session, msgs: CoreMessage[], log: (level: string, msg: string) => void, sessionId: string): void {
+    const { reaped } = reapOrphanBlocks(session, msgs, deactivateBlock);
+    if (reaped.length === 0) return;
+    log("warn", `[${sessionId}] orphan-gc deactivated ${reaped.length} block(s) whose source messages left the client history (${reaped.join(", ")}) — the client or another compression plugin deleted summarized content; those summaries can no longer be decompressed (#1206)`);
+    recordConflict(session, "orphan-reap", `${reaped.length} block(s) deactivated: ${reaped.join(", ")}`);
+}
+
 function sendStats(res: http.ServerResponse): void {
-    const sessions = listSessions().map((s) => ({
+    const all = listSessions();
+    const sessions = all.map((s) => ({
         id: s.id,
         protocol: s.meta.protocol,
         upstream: s.meta.upstreamOrigin,
@@ -5402,7 +5441,7 @@ function sendStats(res: http.ServerResponse): void {
         restored: s.restored === true,
     }));
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ sessions, blindTunnels: getBlindTunnelStats(), unrecognizedPaths: getUnrecognizedPathStats() }, null, 2));
+    res.end(JSON.stringify({ sessions, blindTunnels: getBlindTunnelStats(), unrecognizedPaths: getUnrecognizedPathStats(), conflicts: summarizeConflicts(all) }, null, 2));
 }
 
 /** Stale-install state for the web UI badge (#811): whether the on-disk
@@ -5417,7 +5456,7 @@ async function sendStatus(res: http.ServerResponse, opts: ProxyOptions): Promise
         // fs hiccup: report running state only, never fail the status endpoint
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ version: VERSION, diskVersion, stale, autoRestartOnUpdate: opts.autoRestartOnUpdate, inFlight: totalInFlight() }, null, 2));
+    res.end(JSON.stringify({ version: VERSION, diskVersion, stale, autoRestartOnUpdate: opts.autoRestartOnUpdate, inFlight: totalInFlight(), conflicts: summarizeConflicts(listSessions()) }, null, 2));
 }
 
 function headerValue(req: http.IncomingMessage, name: string): string | undefined {

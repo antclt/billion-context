@@ -7,6 +7,7 @@ import {
     type Config,
     type CoreMessage,
 } from "acp-kernel";
+import { conflictEventsOf, formatConflictSection } from "./conflict-watch.js";
 import { getBlindTunnelStats } from "./mitm.js";
 import { getUnrecognizedPathStats } from "./server/observability.js";
 import { ccrEnabled, contentStoreOf } from "./store.js";
@@ -116,6 +117,14 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
         for (const id of archivedIds) {
             extra.push(`  ${id} — ${archive[id].reason}`);
         }
+    }
+    // #1206: conflict evidence (third-party compression plugin detected, or
+    // runtime signs another compressor rewrote history) — visible here so the
+    // user sees it while the session is still recoverable.
+    const cevents = conflictEventsOf(ctx.session);
+    if (cevents.length > 0) {
+        extra.push("");
+        extra.push(...formatConflictSection(cevents));
     }
     const blind = getBlindTunnelStats();
     if (blind.total > 0) {
