@@ -1698,8 +1698,9 @@ function zcodeStatus(): string {
 
 /** Structured per-lane presence for `bili doctor`: what the lane's entries
  *  point at, which on-disk copy it loads, and the copy's version when
- *  resolvable. Read-only; every probe is best-effort (malformed user config
- *  degrades to partial info instead of crashing the audit). */
+ *  resolvable. Read-only. Multi-face probes degrade to partial info on
+ *  malformed config; single-source probes (pi/opencode/zcode) propagate the
+ *  parse error so doctor reports a broken probe instead of a false "absent". */
 export interface LanePresence {
     installed: boolean;
     pointers: string[];
@@ -1844,12 +1845,7 @@ export function inspectLanePresence(agent: PluginAgent): LanePresence {
     }
     if (agent === "opencode") {
         const file = opencodeTargetFile();
-        let data: Record<string, unknown>;
-        try {
-            ({ data } = loadOpencodeConfig(file));
-        } catch {
-            return laneAbsent();
-        }
+        const { data } = loadOpencodeConfig(file);
         const dir = opencodePluginDir(file);
         const listed = PLUGIN_KEYS.flatMap((k) => pluginEntries(data, k)).filter((p) => p === OPENCODE_NPM_ENTRY || p === dir);
         const hasMcp = isPlainMcpObject(data.mcp) && "bili" in data.mcp;
@@ -1936,12 +1932,7 @@ export function inspectLanePresence(agent: PluginAgent): LanePresence {
         return out;
     }
     // zcode
-    let doc: Record<string, unknown>;
-    try {
-        doc = readJson(zcodeUserConfigFile());
-    } catch {
-        return laneAbsent();
-    }
+    const doc = readJson(zcodeUserConfigFile());
     const sessionStart = zcodeAsPlain(zcodeAsPlain(doc.hooks)?.events)?.SessionStart;
     const hasHook = Array.isArray(sessionStart) && (sessionStart as unknown[]).some(isOursZcodeHookEntry);
     const mcpBili = zcodeAsPlain(zcodeAsPlain(doc.mcp)?.servers)?.bili;

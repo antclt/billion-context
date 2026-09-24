@@ -168,6 +168,63 @@ test("inspectLanePresence hermes: baked plugin.yaml version is the freshness sig
     }
 });
 
+test("inspectLanePresence: corrupt single-source config is a probe failure, not a false absent", () => {
+    const base = mkdtempSync(path.join(tmpdir(), "bc-doctor-corrupt-"));
+    try {
+        const ocDir = path.join(base, "opencode");
+        mkdirSync(ocDir, { recursive: true });
+        writeFileSync(path.join(ocDir, "opencode.json"), "{ not json");
+        withEnv({ OPENCODE_CONFIG: path.join(ocDir, "opencode.json") }, () => {
+            assert.throws(() => inspectLanePresence("opencode"), /not valid JSON/);
+        });
+        const zcDir = path.join(base, "home", ".zcode", "cli");
+        mkdirSync(zcDir, { recursive: true });
+        writeFileSync(path.join(zcDir, "config.json"), "{ not json");
+        withEnv({ HOME: path.join(base, "home") }, () => {
+            assert.throws(() => inspectLanePresence("zcode"), /not valid JSON/);
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test("runDoctor: corrupt lane config surfaces as a broken probe row, not absent", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "bc-doctor-corrupt-run-"));
+    const ocCfg = path.join(base, "opencode.json");
+    writeFileSync(ocCfg, "{ not json");
+    const runWithFetch = mockFetch(() => new Response(JSON.stringify({ name: "billion-context", version: "999.0.0" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    try {
+        await runWithFetch(async () => {
+            await withEnv({
+                HOME: path.join(base, "home"),
+                XDG_CONFIG_HOME: path.join(base, "xdg-config"),
+                XDG_DATA_HOME: path.join(base, "xdg-data"),
+                XDG_CACHE_HOME: path.join(base, "xdg-cache"),
+                XDG_STATE_HOME: path.join(base, "xdg-state"),
+                PI_CODING_AGENT_DIR: undefined,
+                PI_HOME: undefined,
+                DSH_HOME: undefined,
+                HERMES_HOME: undefined,
+                KIMI_CODE_HOME: undefined,
+                CODEX_HOME: undefined,
+                CLAUDE_CONFIG_DIR: undefined,
+                OPENCODE_CONFIG: ocCfg,
+            }, async () => {
+                const report = await runDoctor({ packageName: "billion-context", runningVersion: "0.1.143" });
+                const oc = report.lanes.find((l) => l.agent === "opencode");
+                assert.equal(oc?.verdict, "broken");
+                assert.match(oc?.detail ?? "", /probe failed: .*not valid JSON/);
+                for (const l of report.lanes.filter((x) => x.agent !== "opencode")) {
+                    assert.equal(l.verdict, "absent", `${l.agent} should be absent in an empty sandbox`);
+                }
+                assert.match(renderDoctorReport(report), /probe failed/);
+            });
+        });
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
+
 test("runDoctor: full report against a mocked registry, sandboxed homes", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "bc-doctor-run-"));
     const urls: string[] = [];
