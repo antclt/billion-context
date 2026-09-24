@@ -33,6 +33,7 @@ import { PLUGIN_AGENTS, isPluginAgent, pluginInstall, pluginRemove, pluginStatus
 import { runLaunch, runTestPi, isLaunchClient, type ClientName } from "./launcher.js";
 import { exportSession } from "./export.js";
 import { renderJson, renderText, runDiff } from "./acp-cache-diff.js";
+import { renderDoctorReport, runDoctor } from "./doctor.js";
 import { VERSION, PACKAGE_NAME } from "./version.js";
 
 const HELP = `bili ${VERSION} — billion-context proxy
@@ -63,12 +64,15 @@ Usage:
   bili test pi                     non-polluting pi smoke test through the proxy
   bili export [session] [--full]   list sessions / export one as a Markdown handoff
                                     (--full includes original messages; --output FILE)
-   bili acp-cache diff <dir>        offline prefix-diff attribution over ACP_DUMP_BODY
+  bili acp-cache diff <dir>        offline prefix-diff attribution over ACP_DUMP_BODY
                                    dumps: pairs adjacent requests per session and classifies
                                    each (pure-append / mid-stream-rewrite / prefix-stable-miss);
                                    --json machine output, --log FILE correlates [acp-usage]
                                    lines (default <dir>/bili.log), --no-log skips, --session SID filters
-   bili update                      check for & install a newer version now
+  bili update                      check for & install a newer version now
+  bili doctor                      audit every install lane: versions, owners,
+                                    freshness vs registry, running proxy processes
+                                    (read-only; --json for machine-readable output)
   bili plugin install <agent>      install the thin plugin into a host (pi/omp/
                                     claude/codex/opencode/dsh/kimi; original backed up once)
                                     --with-mcp (opencode only) also adds the mcp.bili
@@ -141,7 +145,7 @@ Docs: https://github.com/ranxianglei/billion-context
 `;
 
 type Parsed = {
-    command: "start" | "update" | "help" | "version" | "launch" | "test" | "export" | "plugin-register" | "mcp" | "plugin" | "acp-cache";
+    command: "start" | "update" | "doctor" | "help" | "version" | "launch" | "test" | "export" | "plugin-register" | "mcp" | "plugin" | "acp-cache";
     client?: ClientName;
     clientArgs: string[];
     mitmDomains: string[];
@@ -158,6 +162,7 @@ type Parsed = {
     acpCacheNoLog?: boolean;
     acpCacheSession?: string;
     jsonOutput?: boolean;
+    doctorJson?: boolean;
 };
 
 export function parseArgs(argv: string[]): Parsed {
@@ -179,6 +184,7 @@ export function parseArgs(argv: string[]): Parsed {
     let acpCacheNoLog = false;
     let acpCacheSession: string | undefined;
     let jsonOutput = false;
+    let doctorJson = false;
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]!;
@@ -241,6 +247,7 @@ export function parseArgs(argv: string[]): Parsed {
                 break;
             case "--json":
                 jsonOutput = true;
+                doctorJson = true;
                 break;
             case "--no-log":
                 acpCacheNoLog = true;
@@ -310,6 +317,8 @@ export function parseArgs(argv: string[]): Parsed {
             command = command === "help" || command === "version" ? command : "start";
         } else if (cmd === "update") {
             command = "update";
+        } else if (cmd === "doctor") {
+            command = "doctor";
         } else if (cmd === "export") {
             command = "export";
             exportSelector = positional[1];
@@ -366,11 +375,11 @@ export function parseArgs(argv: string[]): Parsed {
         }
     }
 
-    return { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp, acpCacheDir, acpCacheLog, acpCacheNoLog, acpCacheSession, jsonOutput };
+    return { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp, acpCacheDir, acpCacheLog, acpCacheNoLog, acpCacheSession, jsonOutput, doctorJson };
 }
 
 export async function main(): Promise<void> {
-    const { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp, acpCacheDir, acpCacheLog, acpCacheNoLog, acpCacheSession, jsonOutput } = parseArgs(process.argv.slice(2));
+    const { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp, acpCacheDir, acpCacheLog, acpCacheNoLog, acpCacheSession, jsonOutput, doctorJson } = parseArgs(process.argv.slice(2));
     if (command === "help") {
         process.stdout.write(HELP);
         return;
@@ -487,6 +496,30 @@ export async function main(): Promise<void> {
             process.stdout.write(text + "\n");
         } catch (error) {
             console.error(`bili export: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
+        return;
+    }
+    if (command === "doctor") {
+        // Read-only lane audit (#1235). Same egress/channel wiring as `bili
+        // update` so the registry freshness check honors -F and updateTag.
+        for (const [k, v] of Object.entries(overrides)) {
+            if (v !== undefined) process.env[k] = v;
+        }
+        let updaterResolveProxy: ((url: string) => string | undefined) | undefined;
+        let updateTag: string | undefined;
+        try {
+            const o = loadOptions();
+            updaterResolveProxy = (url) => resolveProxy(o.routes, o.proxy, url, o.proxyFallback);
+            updateTag = o.updateTag;
+        } catch {
+            // config unloadable — registry egress goes direct
+        }
+        try {
+            const report = await runDoctor({ packageName: PACKAGE_NAME, runningVersion: VERSION, resolveProxy: updaterResolveProxy, updateTag });
+            process.stdout.write(doctorJson ? JSON.stringify(report, null, 2) + "\n" : renderDoctorReport(report));
+        } catch (error) {
+            console.error(`bili doctor: ${error instanceof Error ? error.message : String(error)}`);
             process.exit(1);
         }
         return;
