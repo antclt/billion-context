@@ -51,6 +51,14 @@ export interface NativeInterceptState {
     /** How long a pre-ready model request waits for the bootstrap before
      *  falling back to a direct (uncompressed) send. */
     readyTimeoutMs?: number;
+    /** Owner hook (#1268): resolves when the host-side ACP tool registration
+     *  has finished its FIRST attempt (success OR failure). Model-API requests
+     *  await it (bounded by readyTimeoutMs) before headersFor is consulted, so
+     *  the first request of a fresh session is stamped into plugin mode instead
+     *  of silently riding wire mode because registration lost the boot race
+     *  (observed live: dsh fires R1 ~90ms before the manifest lands). Undefined
+     *  (every lane that does not arm one) = no wait, behavior unchanged. */
+    toolsReady?: Promise<unknown>;
     /** Test/observability hook: every dispatched decision. */
     onDispatch?: (url: string, action: "rewrite" | "direct" | "self" | "retry") => void;
     /** #1290: observability hook — fired for every request the fetch patch lets
@@ -177,7 +185,7 @@ function withHeaders(input: string | URL | Request, init: RequestInit | undefine
     return { input, init };
 }
 
-async function withTimeout(p: Promise<string | undefined>, ms: number): Promise<string | undefined> {
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), ms);
@@ -338,6 +346,23 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
         const orig = downstream;
         const url = fetchUrlOf(input);
         if (url === undefined) return orig(input, init);
+        // #1268: hold the request until the host's ACP tool registration has
+        // finished its first attempt, so headersFor can stamp it into plugin
+        // mode. Steady state costs nothing (gate already resolved). A timeout
+        // or a failed registration falls through exactly like today — the
+        // request proceeds un-stamped (wire mode).
+        let gateLogged = false;
+        const waitToolsGate = async (): Promise<void> => {
+            const gate = state.toolsReady;
+            if (gate === undefined) return;
+            const t0 = Date.now();
+            await withTimeout(gate, state.readyTimeoutMs ?? 15000);
+            const held = Date.now() - t0;
+            if (!gateLogged && held >= 50) {
+                gateLogged = true;
+                console.warn(`[bili-native] held model request ${held}ms for ACP tool registration (#1268)`);
+            }
+        };
         // Rebuild a Request-object input against a different target. A
         // caller-side defect here (already-consumed or locked body) must not
         // reach the proxy-death branch below — respawning would orphan a
@@ -373,12 +398,16 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
             // below, and once a replacement lands the pre-emptive reroute
             // carries unattributed riders along (still passthrough-marked).
             const unattributed = state.takeoverGate !== undefined && !state.takeoverGate(routedTarget);
-            const routedExtra = unattributed ? { [BILI_PASSTHROUGH_HEADER]: "1" } : state.headersFor?.(routedTarget);
             if (unattributed) {
-                const stamped = withHeaders(input, init, routedExtra);
+                const stamped = withHeaders(input, init, { [BILI_PASSTHROUGH_HEADER]: "1" });
                 state.onDispatch?.(url, "direct");
                 return orig(stamped.input, stamped.init);
             }
+            // The gate must clear BEFORE headersFor is consulted — the hook
+            // reads the host's live tool-registration state, and evaluating
+            // it pre-gate would freeze an un-stamped decision forever.
+            await waitToolsGate();
+            const routedExtra = state.headersFor?.(routedTarget);
             let target = url;
             const baked = new URL(url);
             if (replacedOrigins.has(baked.origin)) {
@@ -456,6 +485,7 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
             state.onDispatch?.(url, "self");
             return orig(input, init);
         }
+        await waitToolsGate();
         const first = makeTarget(`${origin}/bili/${url}`);
         state.onDispatch?.(`${origin}/bili/${url}`, "rewrite");
         try {
