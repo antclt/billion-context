@@ -91,12 +91,22 @@ function answerFor(convKey, firstUserText, body) {
     // Directives are parsed from the LAST user message: a `pi -p --continue`
     // follow-up run re-sends the whole history, and its fresh prompt must
     // own the queue — not the filler-heavy first message of run one.
+    // Hosts that keep the scripted prompt in an EARLY user message and append
+    // host-injected user-role context after it (dsh headless: the task, then
+    // workspace-reminder + runtime-snapshot user messages, #1268) fall back to
+    // the FIRST user message when the last one carries no markers — pi's
+    // prompt always owns the last slot, so pi-lane behavior is unchanged.
     const messages = body.messages ?? [];
     const users = messages.filter((x) => x?.role === "user");
     const lastUserText = users.length > 0 ? flatContent(users[users.length - 1].content) : firstUserText;
-    const queueKey = `${convKey}|${lastUserText.slice(0, 64)}`;
+    let sourceText = lastUserText;
+    if (parseDirectives(lastUserText).length === 0 && users.length > 1) {
+        const firstText = flatContent(users[0].content);
+        if (firstText !== lastUserText && parseDirectives(firstText).length > 0) sourceText = firstText;
+    }
+    const queueKey = `${convKey}|${sourceText.slice(0, 64)}`;
     if (!convs.has(queueKey)) {
-        convs.set(queueKey, { directives: parseDirectives(lastUserText), idx: 0 });
+        convs.set(queueKey, { directives: parseDirectives(sourceText), idx: 0 });
     }
     const conv = convs.get(queueKey);
     const i = conv.idx++;
@@ -141,6 +151,8 @@ const server = http.createServer((req, res) => {
                         model: parsed.model,
                         plugin: req.headers["x-bili-plugin"] ?? null,
                         conv: req.headers["x-bili-plugin-conversation"] ?? null,
+                        ctxwin: req.headers["x-bili-plugin-context-window"] ?? null,
+                        maxout: req.headers["x-bili-plugin-max-output"] ?? null,
                         tools: (parsed.tools ?? []).map((t) => t?.function?.name ?? t?.name),
                         nmsg: messages.length,
                         roles: messages.map((x) => x?.role).join(","),
