@@ -12,6 +12,7 @@
  *   bili start --passthrough      forward without compression
  *   bili pi/codex/claude/omp [args]   start a proxy + launch a client via cert-MITM
  *   bili export [id] [--full]     export a persisted session as a handoff doc
+ *   bili acp-cache diff <dir>     attribute cache breaks from ACP_DUMP_BODY dumps
  *   bili test pi                  non-polluting pi smoke test
  *   bili --version
  *   bili --help
@@ -31,6 +32,7 @@ import { runMcpStdio } from "./mcp.js";
 import { PLUGIN_AGENTS, isPluginAgent, pluginInstall, pluginRemove, pluginStatusAll, pluginUpdate, type PluginAgent } from "./plugin-install.js";
 import { runLaunch, runTestPi, isLaunchClient, type ClientName } from "./launcher.js";
 import { exportSession } from "./export.js";
+import { renderJson, renderText, runDiff } from "./acp-cache-diff.js";
 import { VERSION, PACKAGE_NAME } from "./version.js";
 
 const HELP = `bili ${VERSION} — billion-context proxy
@@ -61,7 +63,12 @@ Usage:
   bili test pi                     non-polluting pi smoke test through the proxy
   bili export [session] [--full]   list sessions / export one as a Markdown handoff
                                     (--full includes original messages; --output FILE)
-  bili update                      check for & install a newer version now
+   bili acp-cache diff <dir>        offline prefix-diff attribution over ACP_DUMP_BODY
+                                   dumps: pairs adjacent requests per session and classifies
+                                   each (pure-append / mid-stream-rewrite / prefix-stable-miss);
+                                   --json machine output, --log FILE correlates [acp-usage]
+                                   lines (default <dir>/bili.log), --no-log skips, --session SID filters
+   bili update                      check for & install a newer version now
   bili plugin install <agent>      install the thin plugin into a host (pi/omp/
                                     claude/codex/opencode/dsh/kimi; original backed up once)
                                     --with-mcp (opencode only) also adds the mcp.bili
@@ -134,7 +141,7 @@ Docs: https://github.com/ranxianglei/billion-context
 `;
 
 type Parsed = {
-    command: "start" | "update" | "help" | "version" | "launch" | "test" | "export" | "plugin-register" | "mcp" | "plugin";
+    command: "start" | "update" | "help" | "version" | "launch" | "test" | "export" | "plugin-register" | "mcp" | "plugin" | "acp-cache";
     client?: ClientName;
     clientArgs: string[];
     mitmDomains: string[];
@@ -146,6 +153,11 @@ type Parsed = {
     pluginAction?: "install" | "remove" | "update" | "list";
     pluginAgent?: PluginAgent;
     pluginWithMcp?: boolean;
+    acpCacheDir?: string;
+    acpCacheLog?: string;
+    acpCacheNoLog?: boolean;
+    acpCacheSession?: string;
+    jsonOutput?: boolean;
 };
 
 export function parseArgs(argv: string[]): Parsed {
@@ -162,6 +174,11 @@ export function parseArgs(argv: string[]): Parsed {
     let pluginAction: Parsed["pluginAction"];
     let pluginAgent: Parsed["pluginAgent"];
     let pluginWithMcp = false;
+    let acpCacheDir: string | undefined;
+    let acpCacheLog: string | undefined;
+    let acpCacheNoLog = false;
+    let acpCacheSession: string | undefined;
+    let jsonOutput = false;
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]!;
@@ -222,6 +239,30 @@ export function parseArgs(argv: string[]): Parsed {
             case "--with-mcp":
                 pluginWithMcp = true;
                 break;
+            case "--json":
+                jsonOutput = true;
+                break;
+            case "--no-log":
+                acpCacheNoLog = true;
+                break;
+            case "--log": {
+                const val = argv[++i];
+                if (val === undefined) {
+                    console.error(`bili: ${a} requires a value`);
+                    process.exit(2);
+                }
+                acpCacheLog = val;
+                break;
+            }
+            case "--session": {
+                const val = argv[++i];
+                if (val === undefined) {
+                    console.error(`bili: ${a} requires a value`);
+                    process.exit(2);
+                }
+                acpCacheSession = val;
+                break;
+            }
             case "-F":
             case "--port":
             case "--host":
@@ -307,23 +348,45 @@ export function parseArgs(argv: string[]): Parsed {
                 console.error(`bili test: unknown client "${target ?? ""}" (try "bili test pi")`);
                 process.exit(2);
             }
+        } else if (cmd === "acp-cache") {
+            command = "acp-cache";
+            const action = positional[1];
+            if (action !== "diff") {
+                console.error(`bili acp-cache: unknown action "${action ?? ""}" (try "bili acp-cache diff <dump-dir>")`);
+                process.exit(2);
+            }
+            acpCacheDir = positional[2];
+            if (!acpCacheDir) {
+                console.error("bili acp-cache diff: dump-dir is required");
+                process.exit(2);
+            }
         } else {
             console.error(`bili: unknown command "${cmd}" (try "bili --help")`);
             process.exit(2);
         }
     }
 
-    return { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp };
+    return { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp, acpCacheDir, acpCacheLog, acpCacheNoLog, acpCacheSession, jsonOutput };
 }
 
 export async function main(): Promise<void> {
-    const { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp } = parseArgs(process.argv.slice(2));
+    const { command, client, clientArgs, mitmDomains, overrides, exportSelector, exportOutput, exportFull, registerConversationId, pluginAction, pluginAgent, pluginWithMcp, acpCacheDir, acpCacheLog, acpCacheNoLog, acpCacheSession, jsonOutput } = parseArgs(process.argv.slice(2));
     if (command === "help") {
         process.stdout.write(HELP);
         return;
     }
     if (command === "version") {
         process.stdout.write(VERSION + "\n");
+        return;
+    }
+    if (command === "acp-cache") {
+        try {
+            const report = runDiff(acpCacheDir!, { logFile: acpCacheLog, noLog: acpCacheNoLog, session: acpCacheSession });
+            process.stdout.write(jsonOutput ? renderJson(report) : renderText(report));
+        } catch (error) {
+            console.error(`bili acp-cache: ${error instanceof Error ? error.message : String(error)}`);
+            process.exit(1);
+        }
         return;
     }
     if (command === "plugin-register") {

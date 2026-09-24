@@ -663,6 +663,7 @@ Full command surface (`bili --help` prints an abridged version). Precedence ever
 | `bili kimi [opts --] [args]` | Proxy + **Kimi Code** (Moonshot CLI) — cert-MITM via `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE`; provider/model hosts from `~/.kimi-code/config.toml` (`KIMI_CODE_HOME` respected) or the managed OAuth endpoints when none declared; loopback endpoints inventoried with a manual `/bili/` prefix hint (#757) |
 | `bili test pi` | Non-polluting end-to-end smoke test of the pi path |
 | `bili export [session] [--full] [--output FILE]` | List persisted sessions / export one as a Markdown handoff — see [Sessions & Migration](#sessions--migration) |
+| `bili acp-cache diff <dump-dir> [--json] [--log FILE] [--no-log] [--session SID]` | Attribute cache misses from `ACP_DUMP_BODY` dumps — prefix-diffs adjacent requests per session (#1266) |
 | `bili update` | Check for & install a newer version now (bypasses the 3-minute throttle) |
 | `bili plugin install <agent>` | Install the native-tool plugin / MCP bridge into a host — see [Plugin Mode](#plugin-mode-native-tools) |
 | `bili plugin remove <agent>` | Remove it again |

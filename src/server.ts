@@ -1271,17 +1271,6 @@ async function handle(
         const inLen = Array.isArray(p.input) ? p.input.length : 0;
         log("info", `[debug] INCOMING previous_response_id=${hasPrev ? String(p.previous_response_id).slice(0, 16) : "absent"} input_items=${inLen} instructions=${p.instructions !== undefined ? "present" : "absent"}`);
     }
-    if (bodyDumpEnabled() && parsed && typeof parsed === "object") {
-        try {
-            const rawDir = process.env.ACP_RAW_DUMP_DIR || path.join(stateDir(), "raw");
-            try { fs.mkdirSync(rawDir, { recursive: true }); } catch { /* best-effort */ }
-            const hdrs = maskHeadersForLog(
-                Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(",") : String(v)])),
-            );
-            const hdrText = Object.entries(hdrs).map(([k, v]) => `${k}: ${v}`).join("\n");
-            fs.writeFileSync(path.join(rawDir, `${Date.now()}-INCOMING.txt`), `${req.method} ${maskUrlsInText(req.url ?? "")}\n${hdrText}\n\n${bodyBuffer.toString("utf8")}`);
-        } catch (err) { logDumpFailure("INCOMING dump", err); }
-    }
     // Per-request context limit + compression tuning: look up body.model against
     // the per-route model declaration first, then the built-in table / registry.
     // Compress settings (global → provider → model) merge deepest-field-wins and
@@ -2194,6 +2183,23 @@ async function handle(
                         return null;
                     }
                     prepared = outcome;
+                }
+                // #1266: capture the CLIENT's raw incoming wire AFTER session
+                // binding so the filename carries the session id — INCOMING↔REQ
+                // dumps pair by id for `bili acp-cache diff`. Moved from the
+                // pre-prepare site where no session was bound yet; requests
+                // rejected before prepare lose their INCOMING dump, which is
+                // fine — they never reach upstream and have no REQ dump to pair.
+                if (bodyDumpEnabled() && parsed && typeof parsed === "object") {
+                    try {
+                        const rawDir = process.env.ACP_RAW_DUMP_DIR || path.join(stateDir(), "raw");
+                        try { fs.mkdirSync(rawDir, { recursive: true }); } catch { /* best-effort */ }
+                        const hdrs = maskHeadersForLog(
+                            Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(",") : String(v)])),
+                        );
+                        const hdrText = Object.entries(hdrs).map(([k, v]) => `${k}: ${v}`).join("\n");
+                        fs.writeFileSync(path.join(rawDir, `${Date.now()}-${safeSessionId(session.id)}-INCOMING.txt`), `${req.method} ${maskUrlsInText(req.url ?? "")}\n${hdrText}\n\n${bodyBuffer.toString("utf8")}`);
+                    } catch (err) { logDumpFailure("INCOMING dump", err); }
                 }
                 logRequestCost(log, session.id, inboundMsgs, inboundBytes, reqT0, prepared!.body);
                 return { body: prepared!.body, prepared: prepared! };
