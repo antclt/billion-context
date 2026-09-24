@@ -2187,9 +2187,13 @@ async function handle(
                 // #1266: capture the CLIENT's raw incoming wire AFTER session
                 // binding so the filename carries the session id — INCOMING↔REQ
                 // dumps pair by id for `bili acp-cache diff`. Moved from the
-                // pre-prepare site where no session was bound yet; requests
-                // rejected before prepare lose their INCOMING dump, which is
-                // fine — they never reach upstream and have no REQ dump to pair.
+                // pre-prepare site where no session was bound yet. Requests
+                // rejected before prepare lose their INCOMING dump — fine, they
+                // never reach upstream and produce no REQ dump either.
+                // Bypass/passthrough requests DO reach upstream (their REQ dump
+                // lands under sid "unknown") but no longer get an INCOMING dump;
+                // acceptable because in those modes the proxy rewrites nothing,
+                // so the incoming side adds no attribution signal.
                 if (bodyDumpEnabled() && parsed && typeof parsed === "object") {
                     try {
                         const rawDir = process.env.ACP_RAW_DUMP_DIR || path.join(stateDir(), "raw");
