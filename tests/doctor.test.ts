@@ -177,12 +177,16 @@ test("inspectLanePresence: corrupt single-source config is a probe failure, not 
         withEnv({ OPENCODE_CONFIG: path.join(ocDir, "opencode.json") }, () => {
             assert.throws(() => inspectLanePresence("opencode"), /not valid JSON/);
         });
-        const zcDir = path.join(base, "home", ".zcode", "cli");
-        mkdirSync(zcDir, { recursive: true });
-        writeFileSync(path.join(zcDir, "config.json"), "{ not json");
-        withEnv({ HOME: path.join(base, "home") }, () => {
-            assert.throws(() => inspectLanePresence("zcode"), /not valid JSON/);
-        });
+        // zcode resolves its config via os.homedir(), which follows $HOME on
+        // POSIX but not on Windows — sandboxable only where $HOME rules.
+        if (process.platform !== "win32") {
+            const zcDir = path.join(base, "home", ".zcode", "cli");
+            mkdirSync(zcDir, { recursive: true });
+            writeFileSync(path.join(zcDir, "config.json"), "{ not json");
+            withEnv({ HOME: path.join(base, "home") }, () => {
+                assert.throws(() => inspectLanePresence("zcode"), /not valid JSON/);
+            });
+        }
     } finally {
         rmSync(base, { recursive: true, force: true });
     }
