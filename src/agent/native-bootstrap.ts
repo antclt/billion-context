@@ -74,6 +74,25 @@ export function markNativeHost(env: NodeJS.ProcessEnv, host: string): void {
     }
 }
 
+/** True when a pi/opencode packages[] entry loads the LEGACY standalone
+ *  billion-context-pi extension (#939): npm spec (bare or versioned), or any
+ *  path whose segments contain billion-context-pi (node_modules install, git
+ *  spec or checkout path). That extension compresses IN-PROCESS, and versions
+ *  without the BILLION_CONTEXT_NATIVE stand-down (billion-context-pi#461,
+ *  unreleased at 0.1.71) cannot see the proxy their entry spawns — their
+ *  BILLION_CONTEXT_PROXY check runs at factory time, before our async
+ *  bootstrap writes it, and the fetch-layer rewrite keeps the baseUrl clean.
+ *  Co-resident = every request compressed twice, silently. Shared between the
+ *  pi host entry's co-residence net and the #1206 third-party scan because
+ *  importing pi-native.ts from a non-pi process would run its bootstrap gate. */
+export function isLegacyBcpEntry(entry: string): boolean {
+    const e = entry.trim();
+    const bare = e.replace(/^npm:/, "");
+    return bare === "billion-context-pi"
+        || /^billion-context-pi@/.test(bare)
+        || /(^|[/\\])billion-context-pi([/\\]|$)/.test(e);
+}
+
 /** Concurrent callers share one in-flight bootstrap — a burst of failures
  *  (the proxy died mid-session) must not spawn one proxy per failing request:
  *  ensureProxyRunning has no in-flight dedup of its own. */

@@ -8,7 +8,7 @@ process.env.NODE_ENV = "test";
 
 import { createInitialState } from "acp-kernel";
 import type { Session } from "../src/session.ts";
-import { clearScanCache, conflictScanEnabled, scanClientPlugins, sniffScanClient } from "../src/thirdparty-scan.js";
+import { clearScanCache, conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient, type ThirdPartyFinding } from "../src/thirdparty-scan.js";
 import { CONFLICT_LEDGER_MAX, conflictEventsOf, formatConflictSection, recordConflict, summarizeConflicts } from "../src/conflict-watch.js";
 import { resolveHermesHome, resolveKimiHome, resolveOmpHome, resolvePiHome } from "../src/client-config.js";
 import { SessionStore, _setStoreForTest } from "../src/persist.js";
@@ -94,6 +94,50 @@ test("opencode scan: no config at all yields empty result without throwing", () 
     assert.deepEqual(res.findings, []);
 });
 
+test("opencode scan: project walk never climbs past the git root", () => {
+    const base = tmp("bili-1206-oc-repo-");
+    writeFile(path.join(base, "opencode.json"), JSON.stringify({ plugin: ["acp-decoy"] }));
+    const repo = path.join(base, "repo");
+    fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+    writeFile(path.join(repo, "opencode.json"), JSON.stringify({ plugin: ["acp-inner"] }));
+    const deep = path.join(repo, "src", "nested");
+    fs.mkdirSync(deep, { recursive: true });
+    clearScanCache();
+    const res = scanClientPlugins("opencode", { env: hermeticEnv(base), cwd: deep });
+    const names = res.findings.map((f) => f.entry);
+    assert.ok(names.includes("acp-inner"), "ancestor config up to the .git root is scanned");
+    assert.ok(!names.includes("acp-decoy"), "config ABOVE the .git root must stay out of reach");
+});
+
+test("opencode scan: without a .git anchor the walk stops at cwd", () => {
+    const tree = tmp("bili-1206-oc-nogit-");
+    writeFile(path.join(tree, "opencode.json"), JSON.stringify({ plugin: ["acp-parent"] }));
+    const child = path.join(tree, "child");
+    fs.mkdirSync(child, { recursive: true });
+    // $TMPDIR itself may sit inside a git worktree (workspace-embedded tmp):
+    // then the anchor is that outer root, not "none". Resolve it explicitly so
+    // the assertion holds in both environments.
+    let gitAncestor: string | undefined;
+    {
+        let cur = tree;
+        for (;;) {
+            if (fs.existsSync(path.join(cur, ".git"))) { gitAncestor = cur; break; }
+            const parent = path.dirname(cur);
+            if (parent === cur) break;
+            cur = parent;
+        }
+    }
+    clearScanCache();
+    const res = scanClientPlugins("opencode", { env: hermeticEnv(tree), cwd: child });
+    if (gitAncestor === undefined) {
+        assert.deepEqual(res.findings, [], "no .git anywhere: only cwd is scanned");
+    } else {
+        for (const f of res.findings) {
+            assert.ok(f.source.startsWith(gitAncestor + path.sep), `source stays below the outer git root: ${f.source}`);
+        }
+    }
+});
+
 test("pi scan: legacy bcp entry is known-conflict, keyword entries flagged, bili-self skipped", () => {
     clearScanCache();
     const root = tmp("bili-1206-pi-");
@@ -146,7 +190,7 @@ test("kimi scan: installed.json ids scanned, billion-context skipped", () => {
     assert.equal(res.findings[0]?.entry, "context-keeper");
 });
 
-test("hermes scan: plugin dirs scanned via name + manifest, bili skipped", () => {
+test("hermes scan: plugin dirs matched by dir name only, bili skipped", () => {
     clearScanCache();
     const root = tmp("bili-1206-hermes-");
     const env: NodeJS.ProcessEnv = { ...hermeticEnv(root), HERMES_HOME: path.join(root, "hermes") };
@@ -154,8 +198,20 @@ test("hermes scan: plugin dirs scanned via name + manifest, bili skipped", () =>
     fs.mkdirSync(path.join(pluginsDir, "billion-context"), { recursive: true });
     fs.mkdirSync(path.join(pluginsDir, "weather"), { recursive: true });
     writeFile(path.join(pluginsDir, "context-keeper", "plugin.yaml"), "name: context-keeper\n");
+    // Keyword-rich manifest under a NON-matching dir name must not trigger —
+    // full-text matching false-positives on plain descriptions.
+    writeFile(path.join(pluginsDir, "forecast-tools", "plugin.yaml"), "description: summarizes context for weather forecasts\n");
     const res = scanClientPlugins("hermes", { env, cwd: root });
     assert.deepEqual(res.findings.map((f) => f.entry), ["context-keeper"]);
+});
+
+test("#920: opencode-acp is design-absorbed only under bili's own opencode mode", () => {
+    const known: ThirdPartyFinding = { client: "opencode", entry: "opencode-acp", source: "global", match: "known", knownId: "opencode-acp" };
+    assert.equal(isDesignAbsorbed(known, "opencode"), true);
+    assert.equal(isDesignAbsorbed(known, undefined), false, "wire mode: still a conflict");
+    assert.equal(isDesignAbsorbed(known, "pi"), false);
+    const suspected: ThirdPartyFinding = { client: "opencode", entry: "acp-helper", source: "global", match: "keyword" };
+    assert.equal(isDesignAbsorbed(suspected, "opencode"), false, "keyword tier is never absorbed");
 });
 
 test("dsh scan: profile package.json deps scanned, billion-context skipped", () => {

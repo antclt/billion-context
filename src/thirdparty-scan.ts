@@ -21,12 +21,12 @@ import {
     OPENCODE_CONFIG_FILES,
     parseConfigText,
     readOpencodeConfigRoot,
-    resolveDshHome,
     resolveHermesHome,
     resolveKimiHome,
     resolveOmpHome,
     resolvePiHome,
 } from "./client-config.js";
+import { isLegacyBcpEntry } from "./agent/native-bootstrap.js";
 import { isCodexClient } from "./codex-compact.js";
 import { dshProfileDirs } from "./dsh-channel.js";
 
@@ -44,6 +44,14 @@ export interface ScanResult {
     client: string;
     findings: ThirdPartyFinding[];
     sourcesScanned: number;
+}
+
+/** #920: opencode-acp co-resident with bili's OWN opencode native/launcher
+ *  mode is absorbed by design (legacy sessions keep their compression
+ *  carrier) — it is NOT a conflict there. Everywhere else (wire mode, other
+ *  clients) the same entry warns like any known conflict. */
+export function isDesignAbsorbed(finding: ThirdPartyFinding, pluginAgent: string | undefined): boolean {
+    return finding.client === "opencode" && finding.knownId === "opencode-acp" && pluginAgent === "opencode";
 }
 
 export const SCAN_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -119,14 +127,6 @@ function isBiliSelf(entry: string): boolean {
     return /[/\\]billion-context([/\\]|$)/.test(entry.trim());
 }
 
-// Same predicate as agent/pi-native.ts isLegacyBcpEntry (#939) — duplicated
-// here because importing pi-native.ts would run its bootstrap gate in the
-// proxy process. Keep the two in sync.
-function isLegacyBcpEntry(entry: string): boolean {
-    const e = entry.trim().replace(/^npm:/, "");
-    return e === "billion-context-pi" || /^billion-context-pi@/.test(e) || /[/\\]billion-context-pi([/\\]|$)/.test(e);
-}
-
 function classifyOpencodeEntry(c: Collector, entry: string, source: string): void {
     if (isBiliSelf(entry)) return;
     const trimmed = entry.trim();
@@ -170,11 +170,13 @@ function scanOpencode(env: NodeJS.ProcessEnv, cwd: string): ScanResult {
             if (parent === cur) break;
             cur = parent;
         }
+        // Ancestor configs are only meaningful inside a repo: without a .git
+        // anchor scanning would climb to the fs root and read unrelated trees.
         const dirs: string[] = [];
         cur = start;
         for (;;) {
             dirs.push(cur);
-            if (cur === gitRoot) break;
+            if (gitRoot === undefined || cur === gitRoot) break;
             const parent = path.dirname(cur);
             if (parent === cur) break;
             cur = parent;
@@ -231,6 +233,8 @@ function scanOmp(env: NodeJS.ProcessEnv): ScanResult {
         return { client: "omp", findings: [], sourcesScanned: 0 };
     }
     c.sources += 1;
+    // Block-style items only: an inline flow-style `extensions: [a, b]` line
+    // is not parsed (best-effort by design — the writer emits block style).
     const lines = text.split(/\r?\n/);
     let inBlock = false;
     for (const line of lines) {
@@ -286,13 +290,11 @@ function scanHermes(env: NodeJS.ProcessEnv): ScanResult {
         return { client: "hermes", findings: [], sourcesScanned: 0 };
     }
     c.sources += 1;
+    // Dir name only: matching plugin.yaml full text false-positives on any
+    // description mentioning "context"/"summarize".
     for (const e of entries) {
         if (!e.isDirectory() || e.name === "billion-context") continue;
-        let haystack = e.name;
-        try {
-            haystack = `${haystack}\n${fs.readFileSync(path.join(pluginsDir, e.name, "plugin.yaml"), "utf8")}`;
-        } catch { /* manifest optional — dir name alone is enough */ }
-        if (KEYWORD_RE.test(haystack)) add(c, { client: "hermes", entry: e.name, source: path.join(pluginsDir, e.name), match: "keyword" });
+        if (KEYWORD_RE.test(e.name)) add(c, { client: "hermes", entry: e.name, source: path.join(pluginsDir, e.name), match: "keyword" });
     }
     return { client: "hermes", findings: c.findings, sourcesScanned: c.sources };
 }

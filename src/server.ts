@@ -73,7 +73,7 @@ import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, type ResolvedImageBilling } from "./image-tokens.js";
 import { renderUI, handleConfigGet, handleConfigPut } from "./web/index.js";
 import { reapOrphanBlocks } from "./orphan-gc.js";
-import { conflictScanEnabled, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
+import { conflictScanEnabled, isDesignAbsorbed, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { recordConflict, summarizeConflicts } from "./conflict-watch.js";
 import { getStore } from "./persist.js";
 import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError } from "./logger.js";
@@ -1808,11 +1808,12 @@ async function handle(
                 if (client !== undefined) {
                     const res = scanClientPlugins(client, { env: process.env, cwd: process.cwd() });
                     for (const f of res.findings) {
-                        const absorbed = f.client === "opencode" && f.knownId === "opencode-acp" && pluginAgent === "opencode";
-                        recordConflict(session, "third-party-plugin", `${f.client}: ${f.entry} (${f.source})${absorbed ? " — kept for legacy sessions by design (#920)" : ""}`);
-                        if (!absorbed) {
-                            log("warn", `[conflict] co-resident compression plugin detected on ${f.client}: ${f.entry} (${f.source}) — two compressors on one conversation will double-compress and corrupt message refs (#1206). Remove or disable the other plugin, or route this client exclusively through bili.`);
-                        }
+                        if (isDesignAbsorbed(f, pluginAgent)) continue;
+                        const risk = f.match === "known"
+                            ? "it is bili's sibling compressor — two compressors on one conversation will double-compress and corrupt message refs"
+                            : "its name matches compression keywords — IF it also compresses context, the two compressors will double-compress and corrupt message refs";
+                        recordConflict(session, "third-party-plugin", `${f.client}: ${f.entry} (${f.source})${f.match === "keyword" ? " [suspected]" : ""}`);
+                        log("warn", `[conflict] co-resident compression plugin detected on ${f.client}: ${f.entry} (${f.source}) — ${risk} (#1206). Remove or disable the other plugin, or route this client exclusively through bili.`);
                     }
                 }
             } catch (err) {
