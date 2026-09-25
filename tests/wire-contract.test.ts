@@ -294,7 +294,7 @@ const LANES: Lane[] = [
         wire: "openai-chat",
         model: "gpt-test",
         path: "/v1/chat/completions",
-        clientBody: { model: "gpt-test", max_tokens: 64_000, messages: [{ role: "user", content: "hello" }] },
+        clientBody: { model: "gpt-test", max_tokens: 64_000, stream: true, messages: [{ role: "user", content: "hello" }] },
         clientToolNames: [],
     },
     {

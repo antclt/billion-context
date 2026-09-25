@@ -49,15 +49,18 @@ export const WIRE_RULES: readonly WireRule[] = [
     {
         id: "WC-004",
         wire: "openai-chat",
-        summary: "function tool name matches ^[a-zA-Z0-9_-]{1,64}$ and function.parameters.type === 'object'",
+        summary:
+            "function tool name matches ^[a-zA-Z0-9_-]{1,64}$, function.parameters.type === 'object', and no top-level oneOf/allOf/anyOf/not",
         provenance:
-            "OpenAI Chat Completions API reference (function calling; strict mode rejects parameter schemas that are not plain objects)",
+            "OpenAI Chat Completions API reference (function calling; strict mode rejects parameter schemas that are not plain objects); top-level-combinator ban restored from the old #1302 gate (bili schema portability policy) — dropped during the #1305 consolidation, caught by review mutation C",
     },
     {
         id: "WC-005",
         wire: "responses",
-        summary: "function tool name matches ^[a-zA-Z0-9_-]{1,64}$ and parameters.type === 'object'",
-        provenance: "OpenAI Responses API reference (tools[].name / tools[].parameters)",
+        summary:
+            "function tool name matches ^[a-zA-Z0-9_-]{1,64}$, parameters.type === 'object', and no top-level oneOf/allOf/anyOf/not",
+        provenance:
+            "OpenAI Responses API reference (tools[].name / tools[].parameters); top-level-combinator ban restored from the old #1302 gate (same portability policy as WC-004)",
     },
     {
         id: "WC-006",
@@ -118,6 +121,10 @@ export function validateOpenAiChatBody(body: unknown): string[] {
         const params = fn.parameters;
         if (!isPlainObject(params) || params.type !== "object")
             out.push(`WC-004 ${label}: function.parameters must be an object with type:"object"`);
+        for (const kw of TOP_LEVEL_COMBINATORS) {
+            if (isPlainObject(params) && kw in params)
+                out.push(`WC-004 ${label}: top-level "${kw}" not portable — banned on every wire shape (#1302 policy, restored by #1305 review)`);
+        }
     });
     return out;
 }
@@ -135,6 +142,10 @@ export function validateResponsesBody(body: unknown): string[] {
         const params = t.parameters;
         if (!isPlainObject(params) || params.type !== "object")
             out.push(`WC-005 ${label}: parameters must be an object with type:"object"`);
+        for (const kw of TOP_LEVEL_COMBINATORS) {
+            if (isPlainObject(params) && kw in params)
+                out.push(`WC-005 ${label}: top-level "${kw}" not portable — banned on every wire shape (#1302 policy, restored by #1305 review)`);
+        }
     });
     return out;
 }
@@ -187,7 +198,11 @@ export interface FakeUpstream {
 
 function sse(res: http.ServerResponse, events: Array<[string, unknown]>): void {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    for (const [ev, data] of events) res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+    // OpenAI streams carry no `event:` line at all — only Anthropic/Gemini name their events.
+    for (const [ev, data] of events) {
+        if (ev) res.write(`event: ${ev}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    }
     res.write("data: [DONE]\n\n");
     res.end();
 }

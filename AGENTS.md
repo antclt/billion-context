@@ -673,9 +673,10 @@ after that succeeded was the Windows fix shipped in a follow-up release.
 - **Wire-constraint ledger only grows (#1304).** Every upstream rejection or
   validation constraint discovered in production or provider docs (e.g. #1299:
   Anthropic rejects top-level `oneOf`/`allOf`/`anyOf` in `tools[].input_schema`)
-  becomes a PERMANENT entry in the wire-contract suite — `tests/wire-contract.test.ts`
-  (`WIRE_RULES`, with provenance citing where the constraint was learned) plus
-  enforcement in the matching validation-parity fake upstream
+  becomes a PERMANENT entry in the wire-contract suite — the ledger
+  (`WIRE_RULES`, defined in `tests/wire-contract-fakes.ts`) plus the gates in
+  `tests/wire-contract.test.ts`, with provenance citing where the constraint
+  was learned — and enforcement in the matching validation-parity fake upstream
   (`tests/wire-contract-fakes.ts`) — INSIDE THE FIXING PR. The ledger never
   shrinks without owner sign-off. Golden schema snapshots
   (`tests/golden/wire-contract/*.json`) change only via explicit regeneration
