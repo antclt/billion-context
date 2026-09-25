@@ -5,6 +5,8 @@
 // source of truth), (3) forwards tool executes, (4) reads status. Same
 // package as the proxy ⇒ same version ⇒ no kernel-skew bug class.
 
+import { envMillis } from "./native-bootstrap.js";
+
 export type ManifestTool = {
     name: string;
     description?: string;
@@ -14,6 +16,8 @@ export type ManifestTool = {
 const MANIFEST_TIMEOUT_MS = 5000;
 const TOOL_TIMEOUT_MS = 60000;
 const STATUS_TIMEOUT_MS = 5000;
+const ATTACH_HEALTH_DEADLINE_MS = 15000;
+const ATTACH_HEALTH_POLL_MS = 250;
 
 /** Detect the proxy from a provider baseUrl's `/bili/` zero-config prefix.
  *  The real prefix embeds the full upstream URL (`/bili/https://…`), so the
@@ -193,6 +197,23 @@ export async function fetchProxyVersion(proxyBase: string): Promise<string | und
     if (!ok || !json || typeof json !== "object") return undefined;
     const version = (json as { version?: unknown }).version;
     return typeof version === "string" && version.length > 0 ? version : undefined;
+}
+
+/** #1365: poll the attach liveness probe until it answers or the deadline
+ *  passes. Returns the origin when it is (or comes back) healthy, undefined
+ *  on timeout — callers must fail LOUDLY then, never spawn a replacement the
+ *  pinned model channel cannot follow. BILI_ATTACH_HEALTH_DEADLINE_MS keeps
+ *  slow lifeline restarts from tripping a hard-coded bound; unset = default. */
+export async function waitForProxyVersion(proxyBase: string): Promise<string | undefined> {
+    const limit = envMillis(process.env, "BILI_ATTACH_HEALTH_DEADLINE_MS", ATTACH_HEALTH_DEADLINE_MS);
+    const startedAt = Date.now();
+    for (;;) {
+        const version = await fetchProxyVersion(proxyBase).catch(() => undefined);
+        if (version !== undefined) return proxyBase;
+        const elapsed = Date.now() - startedAt;
+        if (elapsed >= limit) return undefined;
+        await new Promise((r) => setTimeout(r, Math.min(ATTACH_HEALTH_POLL_MS, limit - elapsed)));
+    }
 }
 
 // Model-facing body for /acp status renders: the visible panel goes to the synthetic message's

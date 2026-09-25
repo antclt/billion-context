@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { installNativeFetchIntercept, isModelApiUrl, _resetForTest, type NativeInterceptState } from "../src/agent/native-intercept.ts";
+import { installNativeFetchIntercept, isModelApiUrl, noteRoutedOrigin, _resetForTest, type NativeInterceptState } from "../src/agent/native-intercept.ts";
 
 test("isModelApiUrl: matches model-API endpoint shapes", () => {
     assert.equal(isModelApiUrl("http://127.0.0.1:8199/v1/messages"), true);
