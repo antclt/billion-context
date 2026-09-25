@@ -25,36 +25,44 @@ process.env.BILI_PERSIST = "0";
 
 const MODEL = "claude-sonnet-4-5";
 
-test("rememberPluginMessages: a side-shaped view never evicts a richer snapshot (#1307)", () => {
+test("rememberPluginMessages: a zero-overlap smaller view never evicts the snapshot (#1307)", () => {
     _resetPluginStateForTest();
     const msg = (id: string, text: string) => ({ id, role: "user", contentType: "text", text }) as const;
     const mainView = Array.from({ length: 8 }, (_, i) => msg(`raw-${i}`, `main ${i}`));
     // Fresh session: a 1-message view writes (no previous snapshot to protect).
     rememberPluginMessages("iso-a", [msg("r0", "first")], [msg("r0", "first")]);
     assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 1);
-    // First real main turn (8 messages) replaces it.
+    // First real main turn (8 messages, carries the previous one) replaces it.
     rememberPluginMessages("iso-a", mainView, mainView);
     assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8);
-    // The review request (1 message) must NOT evict the main view.
+    // 1-message auxiliary shape (auto-review): zero overlap, smaller → kept.
     rememberPluginMessages("iso-a", [msg("rev", "flattened transcript")], [msg("rev", "flattened transcript")]);
     assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8, "main snapshot survives the side-shaped write");
-    // A 2-message auxiliary shape is guarded too (title-gen / system+user pairs).
-    rememberPluginMessages("iso-a", [msg("rev-s", "policy"), msg("rev-u", "transcript")], [msg("rev-s", "policy"), msg("rev-u", "transcript")]);
-    assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8);
+    // 3-message auxiliary shape (few-shot review prompt): a SIZE guard (≤2)
+    // would let this through — identity overlap must not. Zero overlap + smaller → kept.
+    rememberPluginMessages("iso-a", [msg("fs-s", "policy"), msg("fs-x", "example"), msg("fs-u", "transcript")], [msg("fs-s", "policy"), msg("fs-x", "example"), msg("fs-u", "transcript")]);
+    assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8, "3-message zero-overlap auxiliary shape is still refused (count is a proxy, identity is not)");
     // Empty views (side passthrough prepared) never clobber either.
     rememberPluginMessages("iso-a", [], []);
     assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8);
-    // A genuinely larger incoming view still overwrites.
-    const bigger = [...mainView, msg("raw-8", "new")];
-    rememberPluginMessages("iso-a", bigger, bigger);
-    assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 9);
-    // A fresh session's small view still writes when nothing richer exists.
-    rememberPluginMessages("iso-b", [msg("b0", "solo")], [msg("b0", "solo")]);
-    assert.equal(_rememberedForTest().get("iso-b")?.processed.length, 1);
-    // Same-size views are not guarded (2 replaces 2): only the shrink direction is.
+    // A genuinely LARGER zero-overlap view writes: a real restart on the same
+    // session id must be able to take over (guard is shrink-direction only).
+    const restart = Array.from({ length: 10 }, (_, i) => msg(`new-${i}`, `restart ${i}`));
+    rememberPluginMessages("iso-a", restart, restart);
+    assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 10);
+    // A SMALLER view that OVERLAPS the snapshot is a continuation (client
+    // trimmed some old messages and resent the rest) — it MUST write; refusing
+    // here would freeze the snapshot against genuine history edits.
+    const trimmed = restart.slice(2);
+    rememberPluginMessages("iso-a", trimmed, trimmed);
+    assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8, "overlapping smaller view writes (continuation, not auxiliary)");
+    // Same-size zero-overlap refresh writes (not a shrink).
     rememberPluginMessages("iso-c", [msg("c0", "a")], [msg("c0", "a")]);
     rememberPluginMessages("iso-c", [msg("c1", "b")], [msg("c1", "b")]);
     assert.equal(_rememberedForTest().get("iso-c")?.processed.length, 1, "same-size refresh replaces (not a shrink)");
+    // A fresh session's small view still writes when nothing richer exists.
+    rememberPluginMessages("iso-b", [msg("b0", "solo")], [msg("b0", "solo")]);
+    assert.equal(_rememberedForTest().get("iso-b")?.processed.length, 1);
     _resetPluginStateForTest();
 });
 
