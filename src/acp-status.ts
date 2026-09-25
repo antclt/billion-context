@@ -90,7 +90,9 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
         const rate = calls > 0 ? Math.round((hits / calls) * 100) : 0;
         extra.push("");
         const rangeRestores = st.rangeRestores ?? 0;
-        extra.push(`STORE (CCR) — ${storeCount} item(s) · ${fmtBytes(st.storedBytes ?? 0)} stored · ${fmtBytes(st.storeBytesSaved ?? 0)} saved on wire · retrieved ${hits}/${calls}${calls > 0 ? ` (${rate}%)` : ""}${rangeRestores > 0 ? ` · range-restored ${rangeRestores}` : ""}`);
+        const delivered = st.retrieveDelivered ?? 0;
+        const dropped = st.retrieveDropped ?? 0;
+        extra.push(`STORE (CCR) — ${storeCount} item(s) · ${fmtBytes(st.storedBytes ?? 0)} stored · ${fmtBytes(st.storeBytesSaved ?? 0)} saved on wire · retrieved ${hits}/${calls}${calls > 0 ? ` (${rate}%)` : ""}${delivered > 0 ? ` · delivered ${delivered}` : ""}${dropped > 0 ? ` · dropped ${dropped}` : ""}${rangeRestores > 0 ? ` · range-restored ${rangeRestores}` : ""}`);
     }
     // #1179 CCR v2: block → covered message-ref linkage, so the model can
     // target acp_retrieve / range decompress at individual messages. Gated on
