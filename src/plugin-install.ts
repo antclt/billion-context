@@ -45,6 +45,40 @@ import { restoreKimiBackup, unrouteKimi } from "./kimi/native.js";
 import { inspectZcodeRouting, resolveZcodeDataDir } from "./zcode/json-edit.js";
 import { restoreZcodeBackup, unrouteZcode } from "./zcode/native.js";
 
+/** Build a SessionStart hook command line that parses in every shell the
+ *  supported agents run hooks through. Two Windows traps, both measured on
+ *  Claude Code 2.1.282:
+ *
+ *  1. A backslash path is escape-eaten by POSIX shells — `D:\Dev\node\node.exe`
+ *     becomes `D:Devnodenode.exe`, so the hook never starts the proxy while
+ *     base_url already points at the fixed port (the session hangs instead of
+ *     failing loudly). Forward slashes are accepted everywhere we emit for.
+ *
+ *  2. Quoting the COMMAND token is not portable:
+ *
+ *         form                     bash   PowerShell        cmd
+ *         bare token                ok       ok             ok
+ *         "quoted" first token      ok     PARSE ERR *      ok
+ *         & "quoted" first token   ERR       ok            ERR
+ *
+ *     *PowerShell reads a leading quoted token as a STRING EXPRESSION: with an
+ *     argument after it the whole command dies at parse time, and alone it
+ *     exits 0 having run nothing — a silent no-op, worse than an error.
+ *
+ *     No spelling covers a spaced command path in all three, so the only
+ *     question is which shell to keep working. Claude Code runs hooks through
+ *     PowerShell on Windows (probe-verified: a cmd-only builtin writes nothing,
+ *     a PowerShell-only one writes its file), so `&` is what keeps the real
+ *     path alive. cmd never sees a spaced command here — the kimi hook resolves
+ *     a bare `node` through PATH, so it is never quoted. Exported for tests. */
+export function portableHookCommand(exe: string, args: string[] = []): string {
+    const fwd = (p: string): string => p.replaceAll("\\", "/");
+    const quoteArg = (p: string): string => (/\s/.test(p) ? `"${p}"` : p);
+    const head = fwd(exe);
+    const tail = args.map((a) => quoteArg(fwd(a)));
+    return /\s/.test(head) ? [`& "${head}"`, ...tail].join(" ") : [head, ...tail].join(" ");
+}
+
 /** #403: never freeze a dead or unverifiable origin into a client's
  *  persistent config — the MCP shell would dial it forever. An explicit
  *  BILI_MCP_PROXY env wins (the user said so); otherwise a recorded
@@ -618,9 +652,10 @@ function claudeInstall(): string {
     saveClaudeNativePort(nativePort);
     const file = claudeSettingsFile();
     const settings = readJson(file);
+    const hookCommand = portableHookCommand(process.execPath, [bootstrapJs]);
     const { data, notes } = applyClaudeManagedBlock(settings, {
         baseUrl: claudeNativeBaseUrl(),
-        hookCommand: `${process.execPath} ${JSON.stringify(bootstrapJs)}`,
+        hookCommand,
     });
     writeJson(file, data);
 
@@ -1407,7 +1442,7 @@ function kimiPluginManifest(root: string): Record<string, unknown> {
         version: selfVersion(),
         description: "billion-context: ACP context-compression proxy (native mode)",
         mcpServers: { bili: { command: "node", args: [path.join(root, "dist", "kimi", "native-mcp.js")], cwd: "./" } },
-        hooks: [{ event: "SessionStart", command: `node ${path.join(root, "dist", "kimi", "bootstrap-hook.js")}`, timeout: 30 }],
+        hooks: [{ event: "SessionStart", command: portableHookCommand("node", [path.join(root, "dist", "kimi", "bootstrap-hook.js")]), timeout: 30 }],
     };
 }
 

@@ -258,7 +258,11 @@ test("pluginInstall / pluginRemove round-trip for kimi under a fake home (#963)"
         assert.ok(manifest.mcpServers.bili.args[0].endsWith(path.join("dist", "kimi", "native-mcp.js")));
         assert.equal(manifest.mcpServers.bili.cwd, "./");
         assert.equal(manifest.hooks[0].event, "SessionStart");
-        assert.ok(manifest.hooks[0].command.endsWith(path.join("dist", "kimi", "bootstrap-hook.js")));
+        // The MCP args above keep the platform separator (they cross as an argv
+        // array, nothing re-parses them). The hook is the one place kimi hands a
+        // shell a STRING, and a Windows path is eaten there as escapes.
+        assert.match(manifest.hooks[0].command, /^node [^"']*dist\/kimi\/bootstrap-hook\.js$/);
+        assert.ok(!manifest.hooks[0].command.includes("\\"), manifest.hooks[0].command);
         interface KimiRegistry { version: number; plugins: Array<{ id: string; root: string; source: string; enabled: boolean }> }
         const reg = JSON.parse(readFileSync(path.join(fake.home, "plugins", "installed.json"), "utf8")) as KimiRegistry;
         assert.equal(reg.version, 1);
