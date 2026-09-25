@@ -155,6 +155,14 @@ function defaultProcReader(): ProcReader {
     return (pid) => readPsProcInfo(pid);
 }
 
+/** Windows keeps the surrounding quotes on a CommandLine token whose path
+ *  needs them (PowerShell Win32_Process.CommandLine, #1377); strip leading/
+ *  trailing quote chars so basename + flag matching sees the bare name. A
+ *  no-op for already-clean inputs (Unix NUL-split /proc argv, macOS ps). */
+function stripQuotes(s: string): string {
+    return s.replace(/^["']+|["']+$/g, "");
+}
+
 /** Is this argv the claude-code session binary? Matches `claude`/`claude.exe`
  *  and `node .../claude...` installs (`@anthropic-ai/claude-code` paths or a
  *  bare `claude` argument). Must NOT match this hook's own script
@@ -164,11 +172,12 @@ function defaultProcReader(): ProcReader {
  *  bottom-up and the REAL claude sits 2 hops up in every session — a closer
  *  match always wins, so a lookalike higher in the tree is unreachable.
  *  Tightening it would instead break real `node ~/bin/claude` launcher
- *  installs. Exported for tests. */
+ *  installs. Basename matching is quote-tolerant (Windows CommandLine keeps
+ *  token quotes — #1377). Exported for tests. */
 export function isClaudeHostArgv(argv: string[]): boolean {
     const base = (p: string): string => {
-        const parts = p.split(/[\\/]/).filter((seg) => seg.length > 0);
-        return parts[parts.length - 1] ?? "";
+        const parts = stripQuotes(p).split(/[\\/]/).filter((seg) => seg.length > 0);
+        return stripQuotes(parts[parts.length - 1] ?? "");
     };
     if (/^claude(\.exe)?$/i.test(base(argv[0] ?? ""))) return true;
     if (/^(node|bun|deno)(\.exe)?$/i.test(base(argv[0] ?? ""))) {
@@ -203,16 +212,16 @@ export function resolveClaudeHostPid(opts: { read?: ProcReader; startPid?: numbe
  *  (claude uses one of these to launch SessionStart hooks on every OS).
  *  Such wrappers exit the moment their command does. Exported for tests. */
 export function isTransientShArgv(argv: string[]): boolean {
-    const parts = (argv[0] ?? "").split(/[\\/]/).filter((seg) => seg.length > 0);
-    const shell = parts[parts.length - 1] ?? "";
+    const parts = stripQuotes(argv[0] ?? "").split(/[\\/]/).filter((seg) => seg.length > 0);
+    const shell = stripQuotes(parts[parts.length - 1] ?? "");
     if (/^(sh|bash|dash|zsh|ksh|ash)(\.exe)?$/i.test(shell)) {
-        return argv.some((arg, i) => i > 0 && /^-[^-]*c$/.test(arg));
+        return argv.some((arg, i) => i > 0 && /^-[^-]*c$/.test(stripQuotes(arg)));
     }
     if (/^cmd(\.exe)?$/i.test(shell)) {
-        return argv.some((arg, i) => i > 0 && /^[-/]c$/i.test(arg));
+        return argv.some((arg, i) => i > 0 && /^[-/]c$/i.test(stripQuotes(arg)));
     }
     if (/^(powershell|pwsh)(\.exe)?$/i.test(shell)) {
-        return argv.some((arg, i) => i > 0 && /^-?(command|encodedcommand)$/i.test(arg));
+        return argv.some((arg, i) => i > 0 && /^-?(command|encodedcommand)$/i.test(stripQuotes(arg)));
     }
     return false;
 }
