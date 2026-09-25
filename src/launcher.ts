@@ -1767,16 +1767,27 @@ function mergeOverlayEntry(src: string, dst: string, excludedNames?: ReadonlySet
 /** True when the real pi settings.json already loads a bili plugin entry —
  *  in that case the launcher must NOT add `-e dist/agent/pi.js` on top (pi
  *  keeps both loaded and same-name tools/commands clash). */
-function piPluginInstalled(piHome: string): boolean {
+export function piPluginInstalled(piHome: string): boolean {
     const root = selfPackageRoot();
     if (!root) return false;
     try {
         const parsed = JSON.parse(fs.readFileSync(path.join(piHome, "settings.json"), "utf8")) as { packages?: unknown };
         const list = Array.isArray(parsed.packages) ? parsed.packages.map(String) : [];
-        return list.some((p) => isBiliPiEntry(p, root));
+        return list.some((p) => isBiliPiEntry(p, root) && piEntryLoadable(p));
     } catch {
         return false;
     }
+}
+
+/** A settings packages entry only counts as installed when pi can actually
+ *  load it: npm: entries are pi-managed, absolute entries must exist on disk.
+ *  A dead path that merely LOOKS like ours (hand-edited settings, moved
+ *  install, another machine's path) must not suppress the launcher's -e
+ *  fallback — that leaves pi with no plugin at all: no /acp, no provider
+ *  rewrites, and the traffic silently bypasses the proxy (#1318). Same
+ *  discipline ompPluginLoadedFrom already applies to omp config entries. */
+export function piEntryLoadable(entry: string): boolean {
+    return entry.startsWith("npm:") || fs.existsSync(entry);
 }
 
 function writeOverlayFileAtomic(overlay: string, fileName: string, contents: string): void {
