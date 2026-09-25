@@ -351,6 +351,7 @@ export function googleModelFromPath(urlPath: string): string | undefined {
     }
 }
 
+
 export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // Configure the tee logger (file + stderr) BEFORE any logging so the very
     // first line (persist status) lands in the file too.
