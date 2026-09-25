@@ -279,10 +279,12 @@ async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, a
             state.toolsReady = true;
             state.retryAt = undefined;
             // #1333: a pi child session (RLM inline spawn) reports its parent
-            // conversation so the proxy can seed it with the parent's blocks
-            // (read-only inheritance). Plain pi sessions never identity-
-            // register (their binding rides prompt_cache_key natively), so the
-            // extra register only fires when derivation is actually declared.
+            // conversation so the proxy can record a read-only inheritance
+            // link (decompress/search_context fall back to the parent chain —
+            // no state is copied). Plain pi sessions never identity-register:
+            // their plugin-mode binding rides the x-bili-plugin-conversation
+            // header stamped per request below, so the extra register only
+            // fires when derivation is actually declared.
             const parent = agent === "pi" ? parentConversationIdOf(ctx) : undefined;
             if ((agent === "omp" || (agent === "pi" && parent !== undefined)) && sid !== "" && state.identityAt !== sid) {
                 try {
