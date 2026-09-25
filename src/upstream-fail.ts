@@ -88,8 +88,8 @@ export function isFailFastUpstreamKind(kind: UpstreamFailureKind): boolean {
 export const UPSTREAM_FAIL_HINTS: Record<UpstreamFailureKind, string> = {
     "client-abort": "downstream client disconnected — no bili-side action",
     "upstream-timeout": "idle budget expired or connect timed out — check upstream health; not retried by design",
-    "proxy-reset": "proxy dropped the connection before the response — check proxy idle-recycle/payload limits (BILI_PROXY_KEEPALIVE_MAX_MS can shorten our reuse window); one transparent replay attempted",
-    "upstream-reset": "upstream/network reset before the response — check upstream and local network; one transparent replay attempted",
+    "proxy-reset": "proxy dropped the connection before the response — check proxy idle-recycle/payload limits (BILI_PROXY_KEEPALIVE_MAX_MS can shorten our reuse window); a bounded transparent replay may be attempted (BILI_REPLAY_RETRY_MAX)",
+    "upstream-reset": "upstream/network reset before the response — check upstream and local network; a bounded transparent replay may be attempted (BILI_REPLAY_RETRY_MAX)",
     "connect-refused": "TCP refused (proxy when configured, else upstream) — endpoint down or wrong port",
     dns: "name resolution failed — DNS server or hostname typo",
     tls: "TLS/certificate failure at CONNECT or upstream handshake — CA/proxy MITM config",
