@@ -227,8 +227,13 @@ test("#1343 W1 restart: reload reconciles acked-but-undelivered ledger entries (
     executeRetrieve({ ref }, session);
     assert.equal(session.stats.retrieveHits, 1);
     session.pendingRetrievals = []; // process restart: carrier resets, durable ledger survives
-    session.restored = true;
+    // Production ordering: persist's load arms ccrReconcilePending, then
+    // getSession() clears `restored` BEFORE prepare runs the reconcile — so
+    // the flag must fire even with restored === false (#1343 review).
+    session.ccrReconcilePending = true;
+    session.restored = false;
     reconcileReloadedRetrievals(session);
+    assert.equal(session.ccrReconcilePending, false, "one-shot: consumed by the first reconcile");
     assert.equal(session.pendingRetrievals.length, 0);
     assert.deepEqual(session.metadata.ccrUndelivered, [], "ledger cleared after reconciliation");
     assert.equal(session.stats.retrieveDropped, 1, "loss counted, not silent");
@@ -240,7 +245,8 @@ test("#1343 W1 restart: reload reconciles acked-but-undelivered ledger entries (
 test("#1343 W1b restart: a re-retrieved ref with a live carrier is left for normal delivery", () => {
     const { session, ref } = seedCCR();
     executeRetrieve({ ref }, session);
-    session.restored = true;
+    session.ccrReconcilePending = true;
+    session.restored = false;
     reconcileReloadedRetrievals(session);
     assert.equal(session.pendingRetrievals.length, 1, "live carrier survives reconcile");
     assert.equal(session.stats.retrieveDropped, 0, "nothing lost while a carrier exists");

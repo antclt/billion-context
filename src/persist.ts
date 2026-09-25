@@ -752,6 +752,10 @@ function buildSession(parsed: PersistedSession): Session {
         // session been used since boot" read the restored flag.
         lastSeen: parsed.savedAt ?? Date.now(),
         restored: true,
+        // #1343: arm the reload reconcile for the first request of THIS
+        // process — getSession() clears `restored` before prepare runs, so
+        // the reconcile needs its own one-shot marker to fire exactly once.
+        ccrReconcilePending: true,
         blockContents,
         lastMessages: Array.isArray(parsed.messages) ? parsed.messages : undefined,
         lastMessagesFolded: parsed.messagesFolded === true,

@@ -245,6 +245,12 @@ export type Session = {
      *  activity; fallback=latest skips restored sessions rather than guessing
      *  among a readdir-order tie. Cleared on the first real request touch. */
     restored?: boolean;
+    /** In-memory only (NOT persisted): one-shot set by persist's load (#1343).
+     *  getSession() clears `restored` on the first request touch, but
+     *  reconcileReloadedRetrievals runs LATER in that same request — so it
+     *  keys off this flag, which survives until the reconcile (or a full
+     *  reset) has actually run. */
+    ccrReconcilePending?: boolean;
     /** In-memory only (NOT persisted — buildRecord omits it): the most recent
      *  successful compress, set by applyRanges and read by the replay/preflight
      *  retry callbacks to correlate a transient upstream rejection with the
@@ -527,6 +533,7 @@ export function resetSessionCompression(session: Session): void {
     session.pendingRetrievals.length = 0;
     delete session.metadata.ccrUndelivered;
     delete session.metadata.ccrDropNotes;
+    session.ccrReconcilePending = false;
     // #1095: same ref-reissue rationale as the content store — encode-cache /
     // fingerprint entries keyed by old refs would misattribute after rebase.
     session.imageEncodeCache?.clear();

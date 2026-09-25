@@ -247,9 +247,12 @@ export function pruneExpiredRetrievals(session: Session, now = Date.now()): void
  *  durable ledger may still hold acked-but-never-delivered refs. Any such ref
  *  with NO live carrier was lost across the restart — report it. Refs that DO
  *  have a live carrier (re-retrieved post-load) are left alone for normal
- *  delivery. */
+ *  delivery. Keyed off ccrReconcilePending (set at load), NOT `restored`:
+ *  getSession() clears the latter on the first request — the very request
+ *  this reconcile must run in (#1343 review). */
 export function reconcileReloadedRetrievals(session: Session): void {
-    if (session.restored !== true) return;
+    if (!session.ccrReconcilePending) return;
+    session.ccrReconcilePending = false;
     const carried = new Set(carrierOf(session).map((p) => p.ref));
     const lost = readLedger(session).filter((e) => !carried.has(e.ref)).map((e) => e.ref);
     if (lost.length > 0) dropRetrievals(session, lost, "proxy restarted before delivery");
