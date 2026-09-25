@@ -3,10 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { createCore, type CompressionCore, type CompressionState, type Config, type CoreMessage, type NudgeDecision, type Prompts, type PackSurface, type ToolPrompts, applyAcpToolOverrides, defaultPrompts, defaultCountTokens, estimateTokensFast, renderNudgeText, deactivateBlock, viableRanges, resolveOutputSteeringConfig } from "acp-kernel";
-import { DEFAULT_STRIP_IMAGES_KEEP_RECENT, applyCompressSettings, resolveCompress, resolveCompressPrompts, resolveCompressSurfaceDetailed, resolveRequestConfig } from "./compress-settings.js";
+import { createCore, type CompressionCore, type CompressionState, type Config, type AbsorbConfig, type CoreMessage, type NudgeDecision, type Prompts, type PackSurface, type ToolPrompts, applyAcpToolOverrides, defaultPrompts, defaultCountTokens, estimateTokensFast, renderNudgeText, deactivateBlock, viableRanges, resolveOutputSteeringConfig } from "acp-kernel";
+import { DEFAULT_STRIP_IMAGES_KEEP_RECENT, applyCompressSettings, resolveAbsorbSettings, resolveCompress, resolveCompressPrompts, resolveCompressSurfaceDetailed, resolveRequestConfig } from "./compress-settings.js";
 import { dropCompressReasoning, type CompressReasoningConfig } from "./reasoning-drop.js";
-import type { ProxyOptions } from "./config.js";
+import type { CompressSettings, ProxyOptions } from "./config.js";
 import { loadOptions, loadRoutes } from "./config.js";
 import { resetProxyCache } from "./upstream-proxy.js";
 import { FALLBACK_EFFECTIVE_WINDOW_FLOOR, findRoute, lookupContextLimit, resolveConfiguredContextLimit, resolveConfiguredOutputLimit, resolveCompressProtocol } from "./config.js";
@@ -60,7 +60,7 @@ import {
     type GoogleSystemInstruction,
     type GoogleTool,
 } from "acp-kernel/wire";
-import { ABSORB_TOOL, ABSORB_TOOL_GOOGLE, ABSORB_TOOL_OPENAI, ABSORB_TOOL_RESPONSES, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
+import { ABSORB_TOOL_NAME, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, absorbToolsFor, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
 import { applyAbsorbView, absorbEnabled, absorbToolName, storeEffectiveAbsorb } from "./absorb.js";
 import { adoptContentStore, ccrEnabled, ccrPluginWireOk, contentStoreOf, drainPendingRetrievals, executeRetrieve, retrieveToolName, storeEffectiveCcr, type CcrSettings } from "./store.js";
 import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
@@ -2617,7 +2617,9 @@ async function prepareAnthropic(
         // strip absorb from the loop config so the REQUIRED instruction never
         // reaches the wire. Hiding recorded absorptions is unaffected
         // (applyAbsorbView hides regardless of enablement).
-        const absorbActive = absorbEnabled(config) && opts.compress.injectTool;
+        const absorbBlock = effectiveAbsorbBlock(pluginMode, config, opts.compress.absorb);
+        const absorbTools = absorbToolsFor(absorbBlock?.toolName ?? ABSORB_TOOL_NAME);
+        const absorbActive = absorbBlock?.enabled === true && opts.compress.injectTool;
         // acp_rule has no processTurn side effect (no markers/instructions are
         // ever injected into messages), so unlike absorb it needs no loop-
         // config stripping — only tool availability matters.
@@ -2626,7 +2628,7 @@ async function prepareAnthropic(
         // BEFORE absorb (ID-reference wins over distill); armed policy is
         // stamped per-request — strip `ccr` from the loop config when disarmed
         // (plugin mode / no tool channel) so placeholders never hit the wire.
-        const loopConfig = { ...(absorbActive ? config : { ...config, absorb: undefined }), ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -2679,7 +2681,7 @@ async function prepareAnthropic(
 
         systemOut = injectSystem(parsed, opts, prompts, loopConfig, ensureCanonicalId(session), surface, visibilityMarkers);
         if (injectTools) {
-            toolsOut = injectTool(parsed.tools, [...(absorbActive ? [ABSORB_TOOL] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts);
+            toolsOut = injectTool(parsed.tools, [...(absorbActive ? [absorbTools.anthropic] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts);
         }
         // Nudge as a separate trailing user message (cache-friendly): the
         // system block stays byte-stable so the prefix cache survives.
@@ -2808,9 +2810,11 @@ async function prepareOpenai(
         // Absorb markers ride in the kernel's processTurn output (gated by
         // config.absorb). Title-gen requests skip ALL injection for
         // prefix-cache stability, so strip absorb from the loop config there.
-        const absorbActive = absorbEnabled(config) && shouldInject;
+        const absorbBlock = effectiveAbsorbBlock(pluginMode, config, opts.compress.absorb);
+        const absorbTools = absorbToolsFor(absorbBlock?.toolName ?? ABSORB_TOOL_NAME);
+        const absorbActive = absorbBlock?.enabled === true && shouldInject;
         const rulesActive = rulesEnabled(config) && shouldInject;
-        const loopConfig = { ...(absorbActive ? config : { ...config, absorb: undefined }), ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -2866,7 +2870,7 @@ async function prepareOpenai(
         const sysParts: string[] = [];
         if (openaiSystemText) sysParts.push(openaiSystemText);
         if (shouldInject) sysParts.push(withConversationIdNote(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers), ensureCanonicalId(session)));
-        if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(config)));
+        if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
         rebuiltMessages = injectOpenaiSystem(rebuiltMessages, sysParts);
         if (sysNotes.length > 0) {
             rebuiltMessages = [...rebuiltMessages, ...sysNotes.map((text) => ({ role: "user" as const, content: text }))];
@@ -2877,7 +2881,7 @@ async function prepareOpenai(
         // avoids double-counting it.
         openaiOutboundSystem = sysParts.join("\n\n");
         if (injectTools) {
-            toolsOut = injectOpenaiTool(parsed.tools, [...(absorbActive ? [ABSORB_TOOL_OPENAI] : []), ...(rulesActive ? [RULE_TOOL_OPENAI] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).openai] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_OPENAI] : [])], surface?.toolPrompts);
+            toolsOut = injectOpenaiTool(parsed.tools, [...(absorbActive ? [absorbTools.openai] : []), ...(rulesActive ? [RULE_TOOL_OPENAI] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).openai] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_OPENAI] : [])], surface?.toolPrompts);
         }
         // Nudge as a separate trailing user message (cache-friendly). Injected
         // in BOTH modes (#451): plugin agents supply the ACP tools but have no
@@ -3022,12 +3026,14 @@ async function prepareGoogle(
         originalMessages = msgs;
         const tokenCount = effectiveTokenCount(session, msgs, imageTokensInParsedBody("google", parsed, imageBillingFor(opts, upstreamOrigin)));
         const activeBefore = new Set(session.state.blocks.filter((b) => b.active).map((b) => b.blockId));
-        const absorbActive = absorbEnabled(config) && shouldInject;
+        const absorbBlock = effectiveAbsorbBlock(pluginMode, config, opts.compress.absorb);
+        const absorbTools = absorbToolsFor(absorbBlock?.toolName ?? ABSORB_TOOL_NAME);
+        const absorbActive = absorbBlock?.enabled === true && shouldInject;
         // acp_rule has no processTurn side effect (no markers/instructions are
         // ever injected into messages), so unlike absorb it needs no loop-
         // config stripping — only tool availability matters.
         const rulesActive = rulesEnabled(config) && shouldInject;
-        const loopConfig = { ...(absorbActive ? config : { ...config, absorb: undefined }), ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags: "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -3063,7 +3069,7 @@ async function prepareGoogle(
         const sysParts: string[] = [];
         if (googleClientSystem) sysParts.push(googleClientSystem);
         if (shouldInject) sysParts.push(withMarkerIntegrityNote(buildCompressSystemPrompt(prompts, surface?.promptSections), visibilityMarkers));
-        if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(config)));
+        if (absorbActive) sysParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
         googleOutboundSystem = sysParts.join("\n\n");
         // Untouched when nothing was added beyond the client's own text: the
         // original `systemInstruction` object then rides through byte-identical
@@ -3071,7 +3077,7 @@ async function prepareGoogle(
         const extraSystemParts = sysParts.slice(googleClientSystem ? 1 : 0);
         systemInstruction = extraSystemParts.length > 0 ? { parts: sysParts.map((text) => ({ text })) } : parsed.systemInstruction;
         if (injectTools) {
-            toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [ABSORB_TOOL_GOOGLE] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts);
+            toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [absorbTools.google] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts);
         }
         if (sysNotes.length > 0) {
             rebuiltContents = appendGoogleNudge(rebuiltContents, sysNotes.join("\n\n---\n\n"));
@@ -3260,9 +3266,11 @@ async function prepareResponses(
         // Absorb markers ride in the kernel's processTurn output (gated by
         // config.absorb). The marker/text protocol has no native tool channel,
         // so strip absorb from the loop config there (both modes).
-        const absorbActive = absorbEnabled(config) && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
+        const absorbBlock = effectiveAbsorbBlock(pluginMode, config, opts.compress.absorb);
+        const absorbTools = absorbToolsFor(absorbBlock?.toolName ?? ABSORB_TOOL_NAME);
+        const absorbActive = absorbBlock?.enabled === true && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
         const rulesActive = rulesEnabled(config) && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
-        const loopConfig = { ...(absorbActive ? config : { ...config, absorb: undefined }), ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags, contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -3303,12 +3311,12 @@ async function prepareResponses(
         if (shouldInject && !isCompactionTrigger && !process.env.ACP_NO_COMPRESS_PROMPT) {
             const prompt = withConversationIdNote(withMarkerIntegrityNote(withSummaryBudgetNote(responsesTextProtocol ? buildCompressHybridSystemPrompt(prompts, surface?.promptSections) : buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers), ensureCanonicalId(session));
             const devParts = [...projection.systemParts, ...forgedSummaries, prompt];
-            if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(config)));
+            if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
             const devContent = devParts.join("\n\n---\n\n");
             responsesDevContent = devContent;
             rebuiltInput = injectResponsesDeveloperMessage(rebuiltInput, devContent);
             if (!process.env.ACP_NO_INJECT_TOOL && injectTools) {
-                const respExtra = [...(absorbActive ? [ABSORB_TOOL_RESPONSES] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
+                const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
                 toolsOut = responsesTextProtocol
                     ? injectResponsesTool(parsed.tools, BILI_ACP_READONLY_TOOLS_RESPONSES, surface?.toolPrompts)
                     : injectResponsesTool(parsed.tools, respExtra.length > 0 ? [...BILI_ACP_TOOLS_RESPONSES, ...respExtra] : BILI_ACP_TOOLS_RESPONSES, surface?.toolPrompts);
@@ -3665,6 +3673,14 @@ function isAutoModeClassifier(parsed: AnthropicRequestBody): boolean {
     const stops = parsed.stop_sequences;
     if (!Array.isArray(stops)) return false;
     return stops.some((s) => typeof s === "string" && AUTO_MODE_CLASSIFIER_STOPS.has(s));
+}
+
+// #1359: which absorb block governs a session, by lane. Proxy lane keeps the
+// per-request merged block (provider/model overrides apply); plugin lane uses
+// the base block so the manifest's advertised name and the gate's adjudicated
+// name always agree — provider/model absorb.* overrides are proxy-lane-only.
+function effectiveAbsorbBlock(pluginMode: boolean, config: Config, baseAbsorb?: CompressSettings["absorb"]): AbsorbConfig | undefined {
+    return pluginMode ? resolveAbsorbSettings(baseAbsorb) : config.absorb;
 }
 
 function injectSystem(
@@ -5102,8 +5118,9 @@ async function forward(
             // Same absorb gate as prepare*: the section only exists where the
             // tool is callable, keeping loop re-requests byte-consistent with
             // the first request (prefix-cache anchor).
-            const absorbActive = absorbEnabled(config) && opts.compress.injectTool && !textProtocol;
-            const loopConfig = { ...(absorbActive ? config : { ...config, absorb: undefined }), ...(ccrEnabled(prepared.session) ? {} : { ccr: undefined }) };
+            const absorbBlock = effectiveAbsorbBlock(prepared.pluginMode === true, config, opts.compress.absorb);
+            const absorbActive = absorbBlock?.enabled === true && opts.compress.injectTool && !textProtocol;
+            const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(prepared.session) ? {} : { ccr: undefined }) };
             const absorbSection = absorbActive
                 ? `\n\n---\n\n${buildAbsorbSystemPrompt(absorbToolName(loopConfig))}`
                 : "";
