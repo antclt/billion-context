@@ -368,13 +368,22 @@ export function parseUsageLog(file: string): Map<string, UsageSample[]> {
     return bySession;
 }
 
+// Same-process clocks write the dump and the usage line; a request's dump
+// ALWAYS precedes its own response's usage line, so the skew window only
+// absorbs write-ordering noise — never lets a LATER request claim an EARLIER
+// response's line. The old +2000ms window did exactly that whenever adjacent
+// requests sat < 2s apart (the compress-loop regime this tool exists to
+// diagnose): sample 1 piled onto request 2, request 1 lost its usage data and
+// prefix-stable-miss detection silently disabled for the dense case.
+const USAGE_SKEW_MS = 50;
+
 function alignUsage(outTs: number[], samples: UsageSample[]): UsageSample[][] {
     // A usage line belongs to the latest request whose dump predates it —
     // responses (and their usage logs) always land after the request dump.
     const assigned: UsageSample[][] = outTs.map(() => []);
     for (const s of samples) {
         for (let i = outTs.length - 1; i >= 0; i--) {
-            if (outTs[i]! <= s.ts + 2000) { assigned[i]!.push(s); break; }
+            if (outTs[i]! <= s.ts + USAGE_SKEW_MS) { assigned[i]!.push(s); break; }
         }
     }
     return assigned;

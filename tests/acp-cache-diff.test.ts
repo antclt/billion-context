@@ -163,6 +163,34 @@ test("runDiff: stable outgoing prefix + collapsed cached tokens classifies prefi
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("runDiff: dense request cadence (<2s apart, compress-loop regime) still aligns usage — a later request must not steal its predecessor's response line", () => {
+    // Regression: the old alignUsage window (+2000ms in the WRONG direction)
+    // let request B's dump claim response A's usage line whenever B followed A
+    // by < 2s. Request A then lost its usage data and the miss went
+    // undetected (pure-append + "no [acp-usage] data") precisely in the dense
+    // compress-loop cadence this tool exists to diagnose.
+    const dir = tmpdir("acp-diff-dense-");
+    try {
+        const tA = Date.parse("2026-09-24T14:32:04.500Z");
+        const tB = tA + 1500; // 1.5s apart
+        twoRequestSession(dir, "ses_dense", tA, tB, {
+            aIn: chatBody("gpt-x", [M1]), bIn: chatBody("gpt-x", [M1, M2]),
+            aOut: chatBody("gpt-x", [M1]), bOut: chatBody("gpt-x", [M1, M2]),
+        });
+        fs.writeFileSync(path.join(dir, "bili.log"), [
+            "2026-09-24T14:32:05.000Z [info] [ses_dense] [acp-usage] round 1 input=100000 cached=95000 (cache hit 95%)",
+            "2026-09-24T14:32:06.000Z [info] [ses_dense] [acp-usage] round 1 input=104000 cached=1000 (cache hit 1%)",
+        ].join("\n") + "\n");
+        const report = runDiff(dir);
+        assert.equal(report.usageSamples, 2);
+        const p = report.sessions[0]!.pairs[0]!;
+        assert.equal(p.usageAvailable, true, "request A must keep its own response's usage line");
+        assert.equal(p.category, "prefix-stable-miss");
+        assert.equal(p.usage?.inputA, 100000);
+        assert.equal(p.usage?.cachedB, 1000);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("runDiff: healthy usage (cached ≈ previous input) stays pure-append", () => {
     const dir = tmpdir("acp-diff-healthy-");
     try {
