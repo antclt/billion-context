@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCore, createInitialState, defaultConfig, coveredMessageIds } from "acp-kernel";
+import { createCore, createInitialState, defaultConfig, coveredMessageIds, validateConfig } from "acp-kernel";
+
+// Feature probe: preserveRecentTools lands in acp-kernel 0.0.93 (kernel PR
+// ranxianglei/acp-kernel#428). Against an older kernel the knob is an
+// unknown config key — validateConfig ignores it — so the kernel-behaviour
+// tests for the knob skip instead of failing; the plumbing tests still
+// run. Once the pin reaches >= 0.0.93 these activate everywhere.
+const KERNEL_HAS_PRESERVE_RECENT = validateConfig({
+    ...defaultConfig(100000),
+    preserveRecentTools: 42,
+}).some((e) => e.includes("preserveRecentTools"));
+const SKIP_PRESCRIPTION = KERNEL_HAS_PRESERVE_RECENT ? false : "needs acp-kernel >= 0.0.93 (preserveRecentTools, acp-kernel#428)";
 import { anthropicToCore, type AnthropicRequestBody } from "acp-kernel/wire";
 import { parseCompressSettings } from "../src/config.ts";
 import { mergeCompress, resolveRequestConfig } from "../src/compress-settings.ts";
@@ -151,21 +162,21 @@ test("empty list []: same protection as removing read (max-protection escape hat
     assert.ok(!out.readCovered);
 });
 
-test("kernel positive knob: preserveRecentTools [\"read\"] is the one-line remedy", () => {
+test("kernel positive knob: preserveRecentTools [\"read\"] is the one-line remedy", { skip: SKIP_PRESCRIPTION }, () => {
     const out = foldReadTurn(undefined, ["read"]);
     assert.equal(out.blocksCreated, 0, "nothing folds — the read pair gained zone protection");
     assert.match(out.errors[0] ?? "", /protected/i);
     assert.ok(!out.readCovered, "read result untouched");
 });
 
-test("kernel: preserveRecentTools subtracts from an explicit never list too", () => {
+test("kernel: preserveRecentTools subtracts from an explicit never list too", { skip: SKIP_PRESCRIPTION }, () => {
     // Explicit list keeps bash excluded; subtracting read protects only read.
     const out = foldReadTurn(["decompress", "search_context", "read", "bash"], ["read"]);
     assert.equal(out.blocksCreated, 0);
     assert.ok(!out.readCovered, "read protected: removed from the explicit list");
 });
 
-test("kernel: preserveRecentTools with a non-matching pattern is a no-op", () => {
+test("kernel: preserveRecentTools with a non-matching pattern is a no-op", { skip: SKIP_PRESCRIPTION }, () => {
     const out = foldReadTurn(undefined, ["grep"]);
     assert.equal(out.errors.length, 0, `no errors: ${out.errors.join("; ")}`);
     assert.ok(out.readCovered, "read still folds — built-in list untouched by a no-match pattern");
