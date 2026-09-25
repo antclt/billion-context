@@ -117,18 +117,6 @@ export function resolveDecompress(
         count = collected.count;
     }
 
-    // #398/#403 refold wiring: a successful FULL-BLOCK restore (this path —
-    // default one-level view or full) hands the block's re-summarization
-    // material back to the model via this tool result, and the client keeps
-    // tool results in its re-sent history. Mark the block so a later compress
-    // of the same span refolds it in place instead of bouncing off "already
-    // compressed". Range restores (startId/endId) return partial content and
-    // must NOT flip the flag; inactive blocks can never refold.
-    if (block.active && !block.restoredInline) {
-        ctx.session.state = markBlockRestoredInline(ctx.session.state, blockId).state;
-        markDirty(ctx.session);
-    }
-
     const header = `[Block ${blockId} content — ${count} item(s)${full ? ", full" : ""}]`;
     const safeBlockId = blockId.replace(/[^a-zA-Z0-9_-]/g, "-");
     const outPath = body.length > 10000 ? join(tmpdir(), `acp-decompress-${safeBlockId}-${Date.now()}.txt`) : null;
@@ -143,14 +131,27 @@ export function resolveDecompress(
             return `${header}\n[Failed to write to ${outPath}: ${String(e)}]\n${safePrefix(body, 4000)}...`;
         }
     }
-    // #1294 P2: inline whole-block restore — flag the block restoredInline
-    // (persisted via the NEW state) so a later compress refolds it in place
-    // (kernel K2), and end the result with the re-fold hint. The toFile path
-    // above returns before this point and stays byte-identical to before.
+    // #398/#403 + #1294 P2 wiring (dedup of #1316 × #1298): a successful INLINE
+    // whole-block restore hands the block's re-summarization material back to
+    // the model via this tool result, and the client keeps tool results in its
+    // re-sent history — flag restoredInline so a later compress refolds the
+    // block in place (kernel K2) instead of bouncing off "already
+    // compressed". The toFile path above returns BEFORE this point and stays
+    // byte-identical to pre-refold behavior (no flag, no hint — the material
+    // lives in a temp file, not the conversation). Range restores
+    // (startId/endId) return partial content and never reach here; inactive
+    // blocks can never refold.
+    if (!block.active) return `${header}\n${body}`;
+    // The kernel result is idempotent — a repeat restore recomputes the same
+    // span, so the hint stays byte-identical across repeats (old contract:
+    // repeat decompress returns identical content). Only the FIRST restore
+    // pays the state write + persist.
     const marked = markBlockRestoredInline(ctx.session.state, blockId);
-    ctx.session.state = marked.state;
-    markDirty(ctx.session);
-    ctx.log(`[acp-decompress-inline] ${blockId}: flagged restoredInline${marked.result?.restoredStartRef ? ` (${marked.result.restoredStartRef}–${marked.result.restoredEndRef})` : ""}`);
+    if (block.restoredInline !== true) {
+        ctx.session.state = marked.state;
+        markDirty(ctx.session);
+        ctx.log(`[acp-decompress-inline] ${blockId}: flagged restoredInline${marked.result?.restoredStartRef ? ` (${marked.result.restoredStartRef}–${marked.result.restoredEndRef})` : ""}`);
+    }
     return `${header}\n${body}\n\n${refoldHint(blockId, marked.result)}`;
 }
 

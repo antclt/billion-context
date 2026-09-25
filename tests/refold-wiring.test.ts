@@ -70,6 +70,17 @@ test("range restore (startId/endId) does NOT flip the flag — partial content i
     assert.notEqual(after.restoredInline, true, "partial restore must not mark the block");
 });
 
+test("toFile spill (>10K chars) does NOT flip the flag — material lives in a temp file, not the conversation", () => {
+    const { ctx, session, block } = compressARange();
+    // Force the spill path deterministically via the decompress cache entry.
+    ctx.session.blockContents.set(block.blockId, { one: null, full: { text: "y".repeat(11000), count: 7 } });
+    const out = resolveDecompress({ blockId: block.blockId }, ctx as never);
+    assert.match(out, /written to:/, "spilled to file");
+    assert.doesNotMatch(out, /Re-fold:/, "no hint on the toFile path");
+    const after = session.state.blocks.find((b) => b.blockId === block.blockId)!;
+    assert.notEqual(after.restoredInline, true, "toFile restore must not mark the block (frozen contract: file mode behavior fully unchanged)");
+});
+
 test("end-to-end: decompress then re-compress same span refolds in place (proxy-shaped empty view)", () => {
     const { ctx, session, block, msgs } = compressARange();
     resolveDecompress({ blockId: block.blockId }, ctx as never);
