@@ -32,7 +32,8 @@ test("rememberPluginMessages: a zero-overlap smaller view never evicts the snaps
     // Fresh session: a 1-message view writes (no previous snapshot to protect).
     rememberPluginMessages("iso-a", [msg("r0", "first")], [msg("r0", "first")]);
     assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 1);
-    // First real main turn (8 messages, carries the previous one) replaces it.
+    // First real main turn (8 messages, larger than the 1-msg snapshot — grow
+    // direction always writes; note: zero id overlap here, that is the point).
     rememberPluginMessages("iso-a", mainView, mainView);
     assert.equal(_rememberedForTest().get("iso-a")?.processed.length, 8);
     // 1-message auxiliary shape (auto-review): zero overlap, smaller → kept.
