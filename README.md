@@ -3,9 +3,9 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-<strong>Universal context-compression proxy</strong> for AI coding agents
+<strong>Context-compression plugin</strong> for all agents — pi, OpenCode, Codex, Claude Code, and more
 <br />
-Any agent that can set a base URL — <em>zero per-agent adapter code</em>.
+Small context windows (a 100K context is enough), <em>5x fewer tokens</em>, and month-long single sessions (billions of tokens). <em>billion-context is all you need.</em>
 </p>
 
 ---
