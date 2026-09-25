@@ -76,6 +76,8 @@ export function mergeCompress(
         tiers: pick("tiers"),
         protectedLatestTools: pick("protectedLatestTools"),
         protectedTools: pick("protectedTools"),
+        neverPreserveRecentTools: pick("neverPreserveRecentTools"),
+        preserveRecentTools: pick("preserveRecentTools"),
         prompts: promptLevels.length > 0 ? Object.assign({}, ...promptLevels) : undefined,
         acknowledgePromptsRisk: pick("acknowledgePromptsRisk"),
         absorb: absorbLevels.length > 0 ? Object.assign({}, ...absorbLevels) : undefined,
@@ -211,6 +213,19 @@ export function hasCompressSettings(s: CompressSettings): boolean {
   *    + paired result of matching tools from every compress range — full-
   *    history protection; see the #639/#1109 trade-off in config.ts).
   *    Whole-array replace, deepest level wins.
+  *  - `neverPreserveRecentTools` → top-level Config (kernel recent-zone
+  *    exclusion list, acp-kernel >= 0.0.92). Whole-array replace, deepest
+  *    level wins; UNSET passes `base.neverPreserveRecentTools` through so the
+  *    kernel built-in default list (`decompress/search_context/read/bash`)
+  *    keeps governing, while an explicit array (including `[]` = exclude
+  *    nothing) replaces it verbatim (#1277: the #1198 read-loop escape
+  *    hatch).
+  *  - `preserveRecentTools` → top-level Config (kernel positive override,
+  *    acp-kernel >= 0.0.93): patterns REMOVED from the effective exclusion
+  *    list computed by the kernel — `[
+  *    "read"]` is the one-entry #1198/#1277 remedy, no built-in list
+  *    restating/freezing. Whole-array replace, deepest level wins; unset
+  *    passes `base.preserveRecentTools` through.
   *  - `absorb` → `absorb` (kernel AbsorbConfig; unset fields inherit the
   *    kernel DEFAULT_ABSORB_CONFIG, so a partial user block still resolves
   *    fully). Absent `s.absorb` leaves `base.absorb` untouched — the feature
@@ -230,7 +245,14 @@ export function hasCompressSettings(s: CompressSettings): boolean {
    *    fields inherit DEFAULT_IMAGE_COMPRESSION_CONFIG. Absent
    *    `s.imageCompression` leaves `base.imageCompression` untouched — the
    *    feature stays off unless some level enables it. */
-export function applyCompressSettings(base: Config, limit: number, s: CompressSettings): Config {
+// Config as resolved for the kernel, plus preserveRecentTools — the knob
+// lands in acp-kernel 0.0.93 (acp-kernel#428) but the resolved object is
+// built and typed here regardless of the installed kernel's Config so both
+// release windows compile identically. Older kernels ignore the extra key
+// (validateConfig does not flag unknown keys).
+export type ResolvedKernelConfig = Config & { preserveRecentTools?: string[] };
+
+export function applyCompressSettings(base: Config, limit: number, s: CompressSettings): ResolvedKernelConfig {
     const nudge = { ...base.nudge };
     const truncate = { ...base.truncate };
     if (s.maxContextLimit !== undefined) nudge.maxContextLimitPct = parsePercent(s.maxContextLimit);
@@ -280,7 +302,7 @@ export function applyCompressSettings(base: Config, limit: number, s: CompressSe
             format: s.imageCompression.format ?? d.format,
         };
     }
-    return {
+    const resolved: ResolvedKernelConfig = {
         ...base,
         modelContextLimit: limit,
         nudge,
@@ -294,11 +316,15 @@ export function applyCompressSettings(base: Config, limit: number, s: CompressSe
         },
         protectedLatestTools: s.protectedLatestTools ?? base.protectedLatestTools,
         protectedTools: s.protectedTools ?? base.protectedTools,
+        neverPreserveRecentTools: s.neverPreserveRecentTools ?? base.neverPreserveRecentTools,
+        // base is Config (0.0.92 lacks the field) — the cast keeps both kernel windows compiling.
+        preserveRecentTools: s.preserveRecentTools ?? (base as ResolvedKernelConfig).preserveRecentTools,
         ...(absorb !== undefined ? { absorb } : {}),
         ...(ccr !== undefined ? { ccr } : {}),
         ...(imageCompression !== undefined ? { imageCompression } : {}),
         ...(s.rules !== undefined ? { rules: { enabled: s.rules === true } } : {}),
     };
+    return resolved;
 }
 
 function parsePercent(v: number | string): number {
@@ -325,7 +351,7 @@ export function resolveRequestConfig(
     model: string,
     native: number | undefined,
     globalCompress?: CompressSettings,
-): Config {
+): ResolvedKernelConfig {
     const compress = resolveCompress(routes, embeddedUrl, model, globalCompress);
     const limit = resolveContextLimitValue(compress.modelContextLimit, native ?? base.modelContextLimit);
     if (!hasCompressSettings(compress) && limit === base.modelContextLimit) return base;

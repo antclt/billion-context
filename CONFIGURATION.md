@@ -328,6 +328,20 @@ For each request, the proxy resolves the settings by longest-URL-prefix match (t
   - **Cumulative snapshots** — each newer result supersedes the older ones (a client's todo/task list): use `protectedLatestTools`. Protecting **all** instances of such a tool makes its history grow unboundedly — the exact failure #639 worked around by protecting only the latest.
   - Rule of thumb: low-frequency, high-value tools → `protectedTools`; chatty tools → never full-history protect (context grows without bound); cumulative-snapshot tools → `protectedLatestTools`.
 
+#### `neverPreserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns)
+- **Default:** unset → kernel built-in `["decompress", "search_context", "read", "bash"]` (requires `acp-kernel` >= 0.0.92)
+- **Status:** ACTIVE
+- **Description:** Tool-name patterns EXCLUDED from the soft-protected recent zone (`preserveRecentMessages`/`preserveRecentTokens`): matching tool results inside the recent window become compressible immediately instead of aging out first. The kernel default keeps `read`/`bash` compressible because they are the largest reclaimable mass — but that same default is what makes batch-read workflows fold freshly-read files right away and descend into the fold→re-read death loop (#1198/#1277). **Recommended remedy: remove only `read`** — `{ "compress": { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] } }` — so fresh read results stay in the recent zone and age out by position later (unlike `protectedLatestTools`, which would pin the newest read forever). Prefer the simpler positive form `preserveRecentTools: ["read"]` when you don't need verbatim-replace semantics — see the next section. Keep `decompress`/`search_context` in the list: re-including them pins just-restored blocks in the recent zone where they become unreclaimable — a different disease. **⚠ Empty array `[]` is VALID and excludes nothing** (max-protection escape hatch) — unlike `protectedTools`/`protectedLatestTools` an empty array is not rejected; an explicit array replaces the default verbatim, whole-array replace at the deepest defined level.
+
+#### `preserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns)
+- **Default:** unset → no subtraction (the `neverPreserveRecentTools` ?? built-in list governs verbatim; requires `acp-kernel` >= 0.0.93)
+- **Status:** ACTIVE
+- **Description:** The **positive-facing** counterpart of `neverPreserveRecentTools`: tool-name patterns **removed** from the effective recent-zone exclusion list. The #1198/#1277 batch-read fold→re-read remedy becomes a one-entry config — `{ "compress": { "preserveRecentTools": ["read"] } }` — that protects fresh read results without restating (or freezing a stale hand-copy of) the built-in list, and keeps following built-in evolution. Effective exclusion = `(neverPreserveRecentTools ?? built-in) minus preserveRecentTools`; composable with an explicit `neverPreserveRecentTools` (subtraction applies to the explicit list too); glob-suffix patterns subtract matching entries (`"bash*"` removes `bash`). Prefer this knob over editing the never-list unless you genuinely need verbatim-replace semantics. **⚠ Empty array `[]` is rejected** — it is a pure no-op here, so a bare `[]` is almost certainly a typo for `neverPreserveRecentTools: []` (the max-protection escape hatch). Whole-array replace at the deepest defined level, like the sibling knobs.
+
 #### `prompts`
 - **Default:** *(kernel defaults — see `acp-kernel` `defaultPrompts`)*
 - **Status:** ACTIVE

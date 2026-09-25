@@ -173,6 +173,40 @@ export type CompressSettings = {
      *  Default: none — opt in per client/agent, since tool names are
      *  client-specific. */
     protectedTools?: string[];
+    /** Tool-name patterns EXCLUDED from the soft-protected recent zone —
+     *  matching tool results inside the recent zone become compressible
+     *  immediately instead of aging out first (kernel
+     *  `neverPreserveRecentTools`, acp-kernel >= 0.0.92). The kernel default
+     *  is `["decompress", "search_context", "read", "bash"]`: read/bash are
+     *  the largest reclaimable mass, so fresh results SHOULD re-enter the
+     *  foldable pool right away. Removing a pattern (recommended: only
+     *  `read`, → `["decompress", "search_context", "bash"]`) keeps freshly
+     *  read files inside the recent zone so batch-read workflows stop hitting
+     *  the fold→re-read death loop (#1198/#1277) — the results age out of the
+     *  zone by position later instead of being pinned forever (unlike
+     *  `protectedLatestTools`). Keep `decompress`/`search_context` excluded:
+     *  re-including them pins just-restored blocks in the recent zone where
+     *  they become unreclaimable — a different disease (#1277 owner note).
+     *  ⚠ Empty array `[]` is VALID and excludes nothing (max-protection
+     *  escape hatch); unlike `protectedTools`/`protectedLatestTools` an empty
+     *  array is not rejected. Unset → kernel built-in default list. Patterns
+     *  match like kernel tool patterns (exact name or `*` glob). Deepest
+     *  level wins (global → provider → model), whole-array replace. */
+    neverPreserveRecentTools?: string[];
+    /** Tool-name patterns REMOVED from the effective recent-zone exclusion
+     *  list — the positive-facing knob: "protect these tools in the recent
+     *  zone" without restating the built-in list (kernel
+     *  `preserveRecentTools`, acp-kernel >= 0.0.93). Effective exclusion =
+     *  `(neverPreserveRecentTools ?? kernel built-in) minus
+     *  preserveRecentTools`, so the #1198/#1277 batch-read fold→re-read
+     *  remedy is a one-entry `[
+     *  "read"]` that keeps following built-in list evolution — no hand-copied
+     *  list to go stale. Composable with an explicit `neverPreserveRecentTools`
+     *  (subtraction applies to it too). Unset/empty = no subtraction — NOT
+     *  the protect-everything hatch (that is `neverPreserveRecentTools: []`).
+     *  Patterns match like kernel tool patterns (exact name or `*` glob).
+     *  Deepest level wins (global → provider → model), whole-array replace. */
+    preserveRecentTools?: string[];
     /** Emit 📦/❌ ACP visibility markers after proxy tool executions
      *  (compress / decompress / search_context / acp_status) — both the marker
      *  line streamed to the client and the marker message re-injected into
@@ -1042,6 +1076,22 @@ export function parseCompressSettings(v: unknown): (CompressSettings & { injectT
         const v = obj[key];
         if (!Array.isArray(v) || v.length === 0 || v.some((x) => typeof x !== "string" || x.trim().length === 0)) ok = false;
         else (out as Record<string, unknown>)[key] = (v as string[]).map((x) => x.trim());
+    }
+    // neverPreserveRecentTools keeps the kernel semantics that an explicit
+    // empty array is meaningful (excludes nothing — the #1198/#1277 escape
+    // hatch), so unlike the two protectedTools knobs an empty array passes.
+    if ("neverPreserveRecentTools" in obj && obj.neverPreserveRecentTools !== undefined) {
+        const v = obj.neverPreserveRecentTools;
+        if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.trim().length === 0)) ok = false;
+        else out.neverPreserveRecentTools = (v as string[]).map((x) => x.trim());
+    }
+    // preserveRecentTools is a pure no-op when empty, so — like the
+    // protectedTools knobs — an empty array is rejected (a bare [] here is
+    // almost certainly a typo for neverPreserveRecentTools: []).
+    if ("preserveRecentTools" in obj && obj.preserveRecentTools !== undefined) {
+        const v = obj.preserveRecentTools;
+        if (!Array.isArray(v) || v.length === 0 || v.some((x) => typeof x !== "string" || x.trim().length === 0)) ok = false;
+        else out.preserveRecentTools = (v as string[]).map((x) => x.trim());
     }
     if ("stripImages" in obj) {
         if (typeof obj.stripImages !== "boolean") ok = false;
