@@ -389,6 +389,7 @@ test("findFreePort: returns another port when preferred is occupied", async () =
 });
 
 import { selfPackageRoot, ompPluginLoadedFrom } from "../src/plugin-install.js";
+import { piPluginInstalled } from "../src/launcher.ts";
 
 test("runLaunch pi: native -e plugin injected only when not installed", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-pie-"));
@@ -861,6 +862,34 @@ test("runLaunch omp: native -e plugin injected only when no loadable config entr
         if (prevOmpDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = prevOmpDir;
         if (stubbed) fs.rmSync(distAgent, { force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("piPluginInstalled: dead bili-shaped entries do not count as installed (#1318)", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-piinst-"));
+    try {
+        const piHome = path.join(home, ".pi", "agent");
+        fs.mkdirSync(piHome, { recursive: true });
+        assert.equal(piPluginInstalled(piHome), false); // no settings.json
+        // A bili-shaped entry pointing at a path that does not exist (hand-edited
+        // settings, moved install, another machine's path) must NOT suppress the
+        // launcher's -e fallback — that left pi with no plugin at all: no /acp,
+        // no provider rewrites, traffic silently bypassing the proxy.
+        fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ packages: ["/u/node_modules/billion-context/dist/agent/pi.js"] }));
+        assert.equal(piPluginInstalled(piHome), false); // dead target
+        // npm: entries are pi-managed and count without a local file check
+        fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ packages: ["npm:billion-context"] }));
+        assert.equal(piPluginInstalled(piHome), true);
+        // A live absolute entry counts
+        const live = path.join(home, "node_modules", "billion-context");
+        fs.mkdirSync(live, { recursive: true });
+        fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ packages: [live] }));
+        assert.equal(piPluginInstalled(piHome), true);
+        // Foreign entries never count
+        fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ packages: [path.join(home, "some-other-pkg")] }));
+        assert.equal(piPluginInstalled(piHome), false);
+    } finally {
         fs.rmSync(home, { recursive: true, force: true });
     }
 });
