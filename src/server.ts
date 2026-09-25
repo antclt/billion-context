@@ -102,7 +102,7 @@ import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } f
 import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats } from "./mitm.js";
 import type { BiliMessage } from "acp-kernel/wire";
-import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type WireProtocol } from "./util.js";
+import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
 
 import { BILI_TUNNEL_HEADER, checkTunnelDestination, classifyIp, localMachineIps, normalizeIpLiteral, parseIpLiteral, tunnelAllowlistFromEnv } from "./tunnel-guard.js";
 import { dumpRejectedBody } from "./error-dump.js";
@@ -2036,9 +2036,18 @@ async function handle(
             // session id (Claude Code subagents) behind one slow upstream stream.
             // forward() re-acquires the lock around its own discrete mutation
             // sections; do not re-wrap the whole forward in this lock.
-            const pendingForward = await withSessionLock(
-                session,
-                async (): Promise<{ body: string | Buffer; prepared: Prepared | null } | null> => {
+            // #1195: prepare + preflight run as a REUSABLE closure so an upstream
+            // overflow can re-run the stage mid-request (see the overflowRefold
+            // wiring below): the caller re-enters it under the session lock with
+            // the window the upstream STATED, forcing the fold the declared
+            // window could never trigger. respondFailFast=false (the overflow
+            // retry path) suppresses the fail-fast response — forward() answers
+            // with the original upstream 400 instead, preserving today's
+            // client-visible contract when the payload cannot be rescued.
+            const runPreparedPipeline = async (
+                respondFailFast: boolean,
+                overflowWindow?: number,
+            ): Promise<{ body: string | Buffer; prepared: Prepared | null } | null> => {
                 const runPrepare = async (): Promise<Prepared> => {
                     const cs = resolveCompress(opts.routes, route?.rewrittenUrl, requestModel, opts.compress);
                     const visibilityMarkers = cs.visibilityMarkers ?? true;
@@ -2116,7 +2125,7 @@ async function handle(
                         res,
                         opts,
                         core,
-                        reqConfig,
+                        overflowWindow !== undefined ? { ...reqConfig, modelContextLimit: overflowWindow } : reqConfig,
                         nativeWindow,
                         requestModel,
                         resolvedNativeWindow,
@@ -2131,7 +2140,7 @@ async function handle(
                         // #301: the payload still overflows the window and
                         // preflight could not fix it — answer with a
                         // structured error instead of forwarding.
-                        if (outcome.respond && !res.destroyed) {
+                        if (respondFailFast && outcome.respond && !res.destroyed) {
                             if (res.headersSent) {
                                 // #568: the hold already committed 200 early — the status
                                 // can no longer change, so deliver the same error in-band
@@ -2176,10 +2185,30 @@ async function handle(
                 }
                 logRequestCost(log, session.id, inboundMsgs, inboundBytes, reqT0, prepared!.body);
                 return { body: prepared!.body, prepared: prepared! };
-            });
+            };
+            const pendingForward = await withSessionLock(session, () => runPreparedPipeline(true));
             if (pendingForward) {
                 forwarded = true;
-                await forward(req, res, opts, pendingForward.body, pendingForward.prepared, core, reqConfig, log, route, instanceId, affinity);
+                // #1195: wire clients (omp/pi on the plain proxy path) treat an
+                // upstream overflow 400 as fatal and end the session — the armed
+                // emergency shrink then never gets its "next turn". When forward()
+                // sees a context overflow it calls this hook: re-run prepare+
+                // preflight under the lock with the window the upstream STATED
+                // (per-call limit override — nothing is learned, #987 keeps
+                // governing), folding the payload below the REAL window and
+                // re-sending it within this same request. An unchanged body
+                // (nothing foldable) returns null and forward() passes the
+                // original 400 through verbatim.
+                const overflowRefold = pendingForward.prepared
+                    ? async (realWindow: number | undefined): Promise<string | Buffer | null> => {
+                          const next = await withSessionLock(session, () => runPreparedPipeline(false, realWindow));
+                          if (!next || String(next.body) === String(pendingForward.body)) return null;
+                          pendingForward.body = next.body;
+                          pendingForward.prepared = next.prepared;
+                          return next.body;
+                      }
+                    : undefined;
+                await forward(req, res, opts, pendingForward.body, pendingForward.prepared, core, reqConfig, log, route, instanceId, affinity, overflowRefold);
                 // Remember for ALL modes (not just plugin): wire clients (dsh,
                 // hermes, unplug'd pi) read the same panel via /__bili/plugin/status
                 // and need the nudge/breakdown sections too; locked so a racing
@@ -4196,6 +4225,7 @@ async function forward(
     route: ReturnType<typeof resolveUpstream>,
     instanceId: string,
     affinity?: string,
+    overflowRefold?: (realWindow: number | undefined) => Promise<string | Buffer | null>,
 ): Promise<void> {
     // E2: a codex native-compaction request intercepted in prepare() carries a
     // forged success response — serve it without contacting upstream.
@@ -4487,6 +4517,141 @@ async function forward(
             }
         }
     }
+    // #987/#1195: arm the one-shot emergency shrink (declared window unchanged,
+    // nothing persisted/learned) — extracted so the same-request overflow retry
+    // below and the !ok passthrough share it exactly once per request.
+    let overflowArmed = false;
+    const armOverflowShrink = (info: ContextOverflowInfo): void => {
+        if (overflowArmed || !info.isOverflow) return;
+        overflowArmed = true;
+        const s = prepared!.session;
+        let reqModel: string | undefined;
+        let rawBody: string | undefined;
+        try {
+            rawBody = typeof prepared!.body === "string" ? prepared!.body : prepared!.body.toString("utf8");
+            const parsedBody = JSON.parse(rawBody) as Record<string, unknown>;
+            reqModel = typeof parsedBody.model === "string" ? parsedBody.model : undefined;
+        } catch {
+            reqModel = undefined;
+        }
+        if (info.window) {
+            // Arm the emergency shrink at EXACTLY the stated window: the
+            // upstream just proved a turn cannot succeed above it, so the
+            // next turn's kernel emergency nudge + tool-result truncate
+            // must fire. #857: a number the upstream itself stated is
+            // usage-grade provenance (not a content estimate); a real
+            // usage report on the next successful turn overwrites it.
+            s.stats.lastInputTokens = info.window;
+            s.stats.lastInputTokensSource = "usage";
+            // #1110: record the arm SEPARATELY so the side-request guard
+            // can read it without ever touching the nudge baseline.
+            s.stats.overflowArmTokens = info.window;
+            log("warn", `[${s.id}] upstream context overflow (model=${reqModel ?? "unknown"}) — window ${info.window} stated upstream; armed emergency shrink, declared window unchanged (#987)`);
+        } else {
+            // No window number stated — nothing to learn (and #987
+            // removed the learner anyway), but the rejection itself is
+            // evidence at the size actually sent: arm at
+            // min(declared, payload estimate). A payload BELOW the
+            // declared window being rejected means the declaration is
+            // wrong (or the upstream is flaky) — arming at the payload's
+            // own size never over-triggers, while a payload OVER the
+            // declared window arms at the declaration — which is what
+            // the #496 image-relay forward-once gate needs to break the
+            // #488 400 loop after exactly one rejected forward.
+            const declared = typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : 0;
+            let est = 0;
+            try {
+                est = estimateTokensFast(rawBody ?? "");
+            } catch { est = 0; }
+            const arm = Math.max(0, Math.min(declared, Number.isFinite(est) ? est : declared));
+            if (arm > 0) {
+                s.stats.lastInputTokens = arm;
+                s.stats.lastInputTokensSource = "usage";
+                s.stats.overflowArmTokens = arm; // #1110: guard reads this, not the baseline
+            }
+            log("warn", `[${s.id}] upstream context overflow (window not parseable, model=${reqModel ?? "unknown"}) — armed emergency shrink at ~${arm} tokens (min of declared ${declared} and payload estimate), nothing learned (#987): ${info.message}`);
+        }
+        // The armed emergency (lastInputTokens) lives in memory only
+        // until scheduled — the error path returns before forward()'s
+        // trailing markDirty, so schedule the save HERE or the arm is
+        // lost on restart.
+        markDirty(s);
+    };
+    // #1195: a context overflow used to arm the shrink and pass the 400 through
+    // verbatim, expecting the NEXT turn to fold — but wire clients treat the
+    // error as fatal and end the session, so the armed rescue never runs and the
+    // session locks. With a refold hook: arm, let the caller re-run prepare+
+    // preflight against the window the upstream STATED (per-call override, no
+    // learning), and re-send the folded body ONCE within this same request. An
+    // unchanged body (nothing foldable), a null refold, or a transport failure
+    // falls back to today's verbatim passthrough below.
+    if (
+        overflowRefold &&
+        prepared?.session &&
+        (upstreamResult.response.status === 400 || upstreamResult.response.status === 413) &&
+        upstreamResult.response.body &&
+        res.writable &&
+        !res.writableEnded &&
+        !res.destroyed
+    ) {
+        let overflowText: string | null = null;
+        try {
+            overflowText = (await readStreamToBuffer(upstreamResult.response.body)).toString("utf8");
+        } catch {
+            overflowText = null;
+        }
+        if (overflowText !== null) {
+            // Rebuild the consumed body (same shape as the role ladder above)
+            // so the error path below reads the same bytes verbatim.
+            upstreamResult = {
+                response: new Response(overflowText, {
+                    status: upstreamResult.response.status,
+                    statusText: upstreamResult.response.statusText,
+                    headers: new Headers(upstreamResult.response.headers),
+                }),
+                clearTimer: upstreamResult.clearTimer,
+                stopIdleTimer: upstreamResult.stopIdleTimer,
+            };
+            const overflowInfo = inspectContextOverflow(upstreamResult.response.status, overflowText);
+            if (overflowInfo.isOverflow) {
+                armOverflowShrink(overflowInfo);
+                const refolded = await overflowRefold(overflowInfo.window).catch(() => null);
+                if (refolded) {
+                    try {
+                        const retried = await fetchWithTimeout(upstreamUrl, { ...init, body: refolded }, undefined, clientAbort.signal);
+                        if (retried.response.ok) {
+                            upstreamResult.clearTimer();
+                            upstreamResult = retried;
+                            log("info", `[${prepared.session.id}] context overflow — refolded and re-sent within the same request, upstream accepted (#1195)`);
+                        } else {
+                            let retryErrText: string | null = null;
+                            if (retried.response.body) {
+                                try {
+                                    retryErrText = (await readStreamToBuffer(retried.response.body)).toString("utf8");
+                                } catch {
+                                    retryErrText = null;
+                                }
+                            }
+                            // Answer with the retry's own verdict, not the stale first 400.
+                            upstreamResult.clearTimer();
+                            upstreamResult = {
+                                response: new Response(retryErrText ?? "", {
+                                    status: retried.response.status,
+                                    statusText: retried.response.statusText,
+                                    headers: new Headers(retried.response.headers),
+                                }),
+                                clearTimer: retried.clearTimer,
+                                stopIdleTimer: retried.stopIdleTimer,
+                            };
+                            log("warn", `[${prepared.session.id}] context overflow — refold retry still rejected (HTTP ${retried.response.status}); passing the retry response through (#1195)`);
+                        }
+                    } catch {
+                        // transport failure — the buffered original 400 answers below
+                    }
+                }
+            }
+        }
+    }
     const { response: upstream, clearTimer: clearUpstreamTimer } = upstreamResult;
     const respHeaders: Record<string, string> = {};
     const respConnNamed = connectionNamedHeaders(upstream.headers.get("connection") ?? undefined);
@@ -4526,7 +4691,9 @@ async function forward(
         // when the configured window is wrong (e.g. the 200k fallback for an
         // unknown model on a relay) an upstream 400 is the only reliable signal
         // that the real window is smaller. Learn the window, arm an emergency
-        // shrink for the next turn, then pass the error through verbatim.
+        // shrink for the next turn, then pass the error through verbatim. When
+        // the #1195 same-request refold above already ran, this is the
+        // passthrough of last resort (retry rejected / nothing foldable).
         let errBody: Buffer | null = null;
         if (upstream.body) {
             try {
@@ -4539,63 +4706,7 @@ async function forward(
             const s = prepared.session;
             const info = inspectContextOverflow(upstream.status, errBody.toString("utf8"));
             if (info.isOverflow) {
-                // #987: no window learning — the context window is a deployment
-                // property, owned by declarations (config / registry /
-                // runtime-info), never adjusted from session traffic. An overflow
-                // still arms the one-shot emergency shrink so the NEXT turn
-                // compresses below the failing size, but nothing is persisted
-                // and the declared window keeps governing.
-                let reqModel: string | undefined;
-                let rawBody: string | undefined;
-                try {
-                    rawBody = typeof prepared.body === "string" ? prepared.body : prepared.body.toString("utf8");
-                    const parsedBody = JSON.parse(rawBody) as Record<string, unknown>;
-                    reqModel = typeof parsedBody.model === "string" ? parsedBody.model : undefined;
-                } catch {
-                    reqModel = undefined;
-                }
-                if (info.window) {
-                    // Arm the emergency shrink at EXACTLY the stated window: the
-                    // upstream just proved a turn cannot succeed above it, so the
-                    // next turn's kernel emergency nudge + tool-result truncate
-                    // must fire. #857: a number the upstream itself stated is
-                    // usage-grade provenance (not a content estimate); a real
-                    // usage report on the next successful turn overwrites it.
-                    s.stats.lastInputTokens = info.window;
-                    s.stats.lastInputTokensSource = "usage";
-                    // #1110: record the arm SEPARATELY so the side-request guard
-                    // can read it without ever touching the nudge baseline.
-                    s.stats.overflowArmTokens = info.window;
-                    log("warn", `[${s.id}] upstream context overflow (model=${reqModel ?? "unknown"}) — window ${info.window} stated upstream; armed emergency shrink, declared window unchanged (#987)`);
-                } else {
-                    // No window number stated — nothing to learn (and #987
-                    // removed the learner anyway), but the rejection itself is
-                    // evidence at the size actually sent: arm at
-                    // min(declared, payload estimate). A payload BELOW the
-                    // declared window being rejected means the declaration is
-                    // wrong (or the upstream is flaky) — arming at the payload's
-                    // own size never over-triggers, while a payload OVER the
-                    // declared window arms at the declaration — which is what
-                    // the #496 image-relay forward-once gate needs to break the
-                    // #488 400 loop after exactly one rejected forward.
-                    const declared = typeof s.metadata.effectiveContextLimit === "number" ? s.metadata.effectiveContextLimit : 0;
-                    let est = 0;
-                    try {
-                        est = estimateTokensFast(rawBody ?? "");
-                    } catch { est = 0; }
-                    const arm = Math.max(0, Math.min(declared, Number.isFinite(est) ? est : declared));
-                    if (arm > 0) {
-                        s.stats.lastInputTokens = arm;
-                        s.stats.lastInputTokensSource = "usage";
-                        s.stats.overflowArmTokens = arm; // #1110: guard reads this, not the baseline
-                    }
-                    log("warn", `[${s.id}] upstream context overflow (window not parseable, model=${reqModel ?? "unknown"}) — armed emergency shrink at ~${arm} tokens (min of declared ${declared} and payload estimate), nothing learned (#987): ${info.message}`);
-                }
-                // The armed emergency (lastInputTokens) lives in memory only
-                // until scheduled — the error path returns before forward()'s
-                // trailing markDirty, so schedule the save HERE or the arm is
-                // lost on restart.
-                markDirty(s);
+                armOverflowShrink(info);
             }
             // #762: learn strict-echo on the MAIN request path too. The loop-only
             // learner (src/loop/core.ts) never sees client-originated 400s, so a
