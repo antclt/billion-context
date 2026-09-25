@@ -328,6 +328,13 @@ For each request, the proxy resolves the settings by longest-URL-prefix match (t
   - **Cumulative snapshots** — each newer result supersedes the older ones (a client's todo/task list): use `protectedLatestTools`. Protecting **all** instances of such a tool makes its history grow unboundedly — the exact failure #639 worked around by protecting only the latest.
   - Rule of thumb: low-frequency, high-value tools → `protectedTools`; chatty tools → never full-history protect (context grows without bound); cumulative-snapshot tools → `protectedLatestTools`.
 
+#### `neverPreserveRecentTools`
+
+- **Type:** `string[]` (tool-name patterns)
+- **Default:** unset → kernel built-in `["decompress", "search_context", "read", "bash"]` (requires `acp-kernel` >= 0.0.92)
+- **Status:** ACTIVE
+- **Description:** Tool-name patterns EXCLUDED from the soft-protected recent zone (`preserveRecentMessages`/`preserveRecentTokens`): matching tool results inside the recent window become compressible immediately instead of aging out first. The kernel default keeps `read`/`bash` compressible because they are the largest reclaimable mass — but that same default is what makes batch-read workflows fold freshly-read files right away and descend into the fold→re-read death loop (#1198/#1277). **Recommended remedy: remove only `read`** — `{ "compress": { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] } }` — so fresh read results stay in the recent zone and age out by position later (unlike `protectedLatestTools`, which would pin the newest read forever). Keep `decompress`/`search_context` in the list: re-including them pins just-restored blocks in the recent zone where they become unreclaimable — a different disease. **⚠ Empty array `[]` is VALID and excludes nothing** (max-protection escape hatch) — unlike `protectedTools`/`protectedLatestTools` an empty array is not rejected; an explicit array replaces the default verbatim, whole-array replace at the deepest defined level.
+
 #### `prompts`
 - **Default:** *(kernel defaults — see `acp-kernel` `defaultPrompts`)*
 - **Status:** ACTIVE

@@ -76,6 +76,7 @@ export function mergeCompress(
         tiers: pick("tiers"),
         protectedLatestTools: pick("protectedLatestTools"),
         protectedTools: pick("protectedTools"),
+        neverPreserveRecentTools: pick("neverPreserveRecentTools"),
         prompts: promptLevels.length > 0 ? Object.assign({}, ...promptLevels) : undefined,
         acknowledgePromptsRisk: pick("acknowledgePromptsRisk"),
         absorb: absorbLevels.length > 0 ? Object.assign({}, ...absorbLevels) : undefined,
@@ -211,6 +212,13 @@ export function hasCompressSettings(s: CompressSettings): boolean {
   *    + paired result of matching tools from every compress range — full-
   *    history protection; see the #639/#1109 trade-off in config.ts).
   *    Whole-array replace, deepest level wins.
+  *  - `neverPreserveRecentTools` → top-level Config (kernel recent-zone
+  *    exclusion list, acp-kernel >= 0.0.92). Whole-array replace, deepest
+  *    level wins; UNSET passes `base.neverPreserveRecentTools` through so the
+  *    kernel built-in default list (`decompress/search_context/read/bash`)
+  *    keeps governing, while an explicit array (including `[]` = exclude
+  *    nothing) replaces it verbatim (#1277: the #1198 read-loop escape
+  *    hatch).
   *  - `absorb` → `absorb` (kernel AbsorbConfig; unset fields inherit the
   *    kernel DEFAULT_ABSORB_CONFIG, so a partial user block still resolves
   *    fully). Absent `s.absorb` leaves `base.absorb` untouched — the feature
@@ -294,6 +302,7 @@ export function applyCompressSettings(base: Config, limit: number, s: CompressSe
         },
         protectedLatestTools: s.protectedLatestTools ?? base.protectedLatestTools,
         protectedTools: s.protectedTools ?? base.protectedTools,
+        neverPreserveRecentTools: s.neverPreserveRecentTools ?? base.neverPreserveRecentTools,
         ...(absorb !== undefined ? { absorb } : {}),
         ...(ccr !== undefined ? { ccr } : {}),
         ...(imageCompression !== undefined ? { imageCompression } : {}),
