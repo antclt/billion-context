@@ -95,6 +95,26 @@ test("parentConversationIdOf resolves the parent id from the child's parentSessi
     }
 });
 
+test("parentConversationIdOf returns omp's bare session-id parentSession verbatim (#1362)", () => {
+    // omp fork() records the parent's BARE SESSION ID in parentSession (not a
+    // file path) — it IS the parent conversation id and is returned without any
+    // file access. The discriminator mirrors omp's own gc-cli rule: only an
+    // absolute path or a *.jsonl suffix is a file reference.
+    assert.equal(
+        parentConversationIdOf({ sessionManager: { getSessionId: () => "omp-child", getHeader: () => ({ type: "session", id: "omp-child", parentSession: "omp-parent-uuid" }) } } as never),
+        "omp-parent-uuid",
+    );
+    // Surrounding whitespace trims before the shape check; blank reports nothing.
+    assert.equal(
+        parentConversationIdOf({ sessionManager: { getSessionId: () => "omp-child", getHeader: () => ({ id: "omp-child", parentSession: "  omp-parent-uuid  " }) } } as never),
+        "omp-parent-uuid",
+    );
+    assert.equal(
+        parentConversationIdOf({ sessionManager: { getSessionId: () => "omp-child", getHeader: () => ({ id: "omp-child", parentSession: "   " }) } } as never),
+        undefined,
+    );
+});
+
 test("identity and pending registers carry parentConversationId end to end (#1333)", () => {
     _reset_for_test();
     const written: string[] = [];

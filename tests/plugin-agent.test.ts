@@ -58,7 +58,7 @@ test("proxyBaseFromEnv accepts BILLION_CONTEXT_PROXY, detectProxyBase honors kil
 type FakeProxy = {
     origin: string;
     toolCalls: Array<{ conversationId: string; tool: string; args: unknown }>;
-    registers: Array<{ conversationId: string; agent: string; identity: boolean }>;
+    registers: Array<{ conversationId: string; agent: string; identity: boolean; parentConversationId?: string }>;
     runtimeInfos: Array<Record<string, unknown>>;
     close(): Promise<void>;
 };
@@ -96,8 +96,8 @@ async function startFakeProxy(opts: { failRegister?: number; statusOk?: boolean 
             let body = "";
             req.on("data", (c) => (body += c));
             req.on("end", () => {
-                const data = JSON.parse(body) as { conversationId?: string; agent?: string; identity?: boolean };
-                registers.push({ conversationId: data.conversationId ?? "", agent: data.agent ?? "", identity: data.identity === true });
+                const data = JSON.parse(body) as { conversationId?: string; agent?: string; identity?: boolean; parentConversationId?: unknown };
+                registers.push({ conversationId: data.conversationId ?? "", agent: data.agent ?? "", identity: data.identity === true, ...(typeof data.parentConversationId === "string" && data.parentConversationId ? { parentConversationId: data.parentConversationId } : {}) });
                 if (opts.failRegister !== undefined) {
                     res.writeHead(opts.failRegister);
                     res.end("{}");
@@ -1934,6 +1934,36 @@ test("omp identity register failure throttles and retries later", async () => {
         }
         assert.equal(proxy.registers.length, 2, "retried after the throttle window");
         assert.equal(pi.registerCalls, 2, "tools registered once, not re-registered on retry");
+    } finally {
+        await proxy.close();
+    }
+});
+
+test("#1362: omp child sessions report parentConversationId in the identity register", async () => {
+    const proxy = await startFakeProxy();
+    try {
+        const pi = makeFakePi();
+        createBiliPlugin("omp")(pi as never);
+        // omp fork() records the parent's BARE SESSION ID in the header.
+        const headerCtx = { ...fakeCtx(proxy, "omp-sess-child"), sessionManager: { getSessionId: () => "omp-sess-child", getHeader: () => ({ type: "session", id: "omp-sess-child", parentSession: "omp-parent-bare-id" }) } };
+        await pi.events.get("session_start")!({}, headerCtx);
+        await waitForTools(pi, 2);
+        const deadline = Date.now() + 15000;
+        while (proxy.registers.length < 1 && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 25));
+        }
+        assert.deepEqual(proxy.registers, [{ conversationId: "omp-sess-child", agent: "omp", identity: true, parentConversationId: "omp-parent-bare-id" }], "bare-id parentSession reported verbatim");
+
+        // A plain omp session (no parentSession) keeps today's exact payload shape.
+        const pi2 = makeFakePi();
+        createBiliPlugin("omp")(pi2 as never);
+        await pi2.events.get("session_start")!({}, fakeCtx(proxy, "omp-sess-plain"));
+        await waitForTools(pi2, 2);
+        const deadline2 = Date.now() + 15000;
+        while (proxy.registers.length < 2 && Date.now() < deadline2) {
+            await new Promise((r) => setTimeout(r, 25));
+        }
+        assert.deepEqual(proxy.registers[1], { conversationId: "omp-sess-plain", agent: "omp", identity: true }, "no parentConversationId key for root sessions");
     } finally {
         await proxy.close();
     }

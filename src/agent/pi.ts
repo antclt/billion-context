@@ -6,6 +6,7 @@
 // from the host at runtime (the host duck-types us in).
 
 import fs from "node:fs";
+import path from "node:path";
 import { wrapCacheReport, wrapRuleReport } from "../acp-panel.js";
 import { awaitNativeProxyOrigin } from "./native-bootstrap.js";
 import { detectProxyBase, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
@@ -75,19 +76,27 @@ function sessionIdOf(ctx: Ctx): string | undefined {
     }
 }
 
-/** [#1333] pi session files declare derivation in their header: the header of
- *  an RLM inline-spawned child carries parentSession = the PATH of the parent
- *  session file. The parent's conversation id is that file's own header id, so
- *  resolving it takes one bounded read (64KB covers any header pi writes —
- *  headers are the first JSONL line). Returns undefined for root sessions,
- *  unreadable parents, or hosts without getHeader — derivation reporting is
- *  strictly best-effort and never blocks registration. */
+/** [#1333/#1362] Session files declare derivation in their header: the header
+ *  of a spawned/forked child carries parentSession. The value has TWO shapes
+ *  across hosts — pi RLM inline spawns write the PATH of the parent session
+ *  file, while omp fork() writes the PARENT'S BARE SESSION ID directly. The
+ *  parent's conversation id is that file's own header id for paths (one bounded
+ *  read — 64KB covers any header these hosts write; headers are the first JSONL
+ *  line), and the bare value itself when it is an id. The path-vs-id split
+ *  mirrors omp's own gc-cli discriminator: only an absolute path or a *.jsonl
+ *  suffix is treated as a file reference; anything else is an id (fail-safe —
+ *  an ambiguous alias resolves to nothing rather than guessing). Returns
+ *  undefined for root sessions, unreadable parents, or hosts without getHeader
+ *  — derivation reporting is strictly best-effort and never blocks registration. */
 export function parentConversationIdOf(ctx: Ctx): string | undefined {
     try {
         const header = ctx.sessionManager?.getHeader?.() as { parentSession?: unknown } | null | undefined;
-        const parentPath = typeof header?.parentSession === "string" ? header.parentSession.trim() : "";
-        if (!parentPath) return undefined;
-        const fd = fs.openSync(parentPath, "r");
+        const ref = typeof header?.parentSession === "string" ? header.parentSession.trim() : "";
+        if (!ref) return undefined;
+        // omp fork records the parent session id verbatim; pi records a path.
+        const isFileRef = path.isAbsolute(ref) || ref.endsWith(".jsonl");
+        if (!isFileRef) return ref;
+        const fd = fs.openSync(ref, "r");
         try {
             const buf = Buffer.alloc(64 * 1024);
             const n = fs.readSync(fd, buf, 0, buf.length, 0);
@@ -278,14 +287,17 @@ async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, a
             }
             state.toolsReady = true;
             state.retryAt = undefined;
-            // #1333: a pi child session (RLM inline spawn) reports its parent
+            // #1333/#1362: a child session (pi RLM inline spawn, omp fork or
+            // newSession with a parentSession header) reports its parent
             // conversation so the proxy can record a read-only inheritance
             // link (decompress/search_context fall back to the parent chain —
             // no state is copied). Plain pi sessions never identity-register:
             // their plugin-mode binding rides the x-bili-plugin-conversation
             // header stamped per request below, so the extra register only
-            // fires when derivation is actually declared.
-            const parent = agent === "pi" ? parentConversationIdOf(ctx) : undefined;
+            // fires when derivation is actually declared. omp ALWAYS registers
+            // (its wire carries no other conversation signal), so it reports
+            // the parent whenever the header declares one.
+            const parent = agent === "pi" || agent === "omp" ? parentConversationIdOf(ctx) : undefined;
             if ((agent === "omp" || (agent === "pi" && parent !== undefined)) && sid !== "" && state.identityAt !== sid) {
                 try {
                     await postIdentityRegister(proxyBase, sid, agent, parent);
