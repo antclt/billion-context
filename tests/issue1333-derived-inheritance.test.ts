@@ -297,9 +297,11 @@ function startMockUpstream(state: RelayState): http.Server {
 type ChatMsg = { role: string; content: string };
 
 async function chat(url: string, messages: ChatMsg[], conversation: string, extraHeaders: Record<string, string> = {}): Promise<string> {
+    const headers: Record<string, string> = { "content-type": "application/json", ...extraHeaders };
+    if (conversation) headers["x-acp-session"] = conversation;
     const res = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-acp-session": conversation, ...extraHeaders },
+        headers,
         body: JSON.stringify({ model: "gpt-test", stream: true, messages }),
     });
     if (!res.ok) assert.fail(`HTTP ${res.status}: ${await res.text()}`);
@@ -457,3 +459,134 @@ async function runDerivedInheritanceE2E(shape: "anonymous" | "stamped"): Promise
         await close(relay);
     }
 }
+
+test("child whose requests carry the real plugin wire shape links its parent (#1362)", async () => {
+    _reset_for_test();
+    _setStoreForTest(new SessionStore({ enabled: false }));
+    setRegistryForTest({});
+    const run = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const parentConv = `pfa-parent-${run}`;
+    const childConv = `pfa-child-wire-${run}`;
+
+    const state: RelayState = { upstreamReqs: [], compressed: false };
+    const relay = startMockUpstream(state);
+    await listen(relay);
+    const relayPort = (relay.address() as { port: number }).port;
+    const proxy = await startServer(proxyOpts(relayPort));
+    await listen(proxy);
+    const proxyPort = (proxy.address() as { port: number }).port;
+    const url = `http://127.0.0.1:${proxyPort}/bili/http://127.0.0.1:${relayPort}/v1/chat/completions`;
+
+    const preExisting = new Set(listSessions().map((s) => s.id));
+    const newSessions = () => listSessions().filter((s) => !preExisting.has(s.id));
+    try {
+        const history: ChatMsg[] = [];
+        for (let i = 1; i <= 8; i++) {
+            history.push({ role: "user", content: `run ${run} parent turn ${i}: ${FILLER.repeat(12)}` });
+            const reply = await chat(url, history, parentConv);
+            assert.ok(reply.length > 0, `parent turn ${i} must produce a reply`);
+            history.push({ role: "assistant", content: reply });
+        }
+        const parent = newSessions()[0]!;
+        const parentActive = parent.state.blocks.filter((b) => b.active);
+        assert.ok(parentActive.length >= 1, `parent must have a folded block (got ${parentActive.length})`);
+        const blockId = parentActive[0]!.blockId;
+
+        const reg = await fetch(`http://127.0.0.1:${proxyPort}/__bili/plugin/register`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversationId: childConv, agent: "pi", identity: true, parentConversationId: parentConv }),
+        });
+        assert.ok(reg.ok, "register must succeed");
+
+        // The child's requests carry the REAL pi wire shape — before_provider_headers
+        // stamps x-bili-plugin + x-bili-plugin-conversation on every request, so the
+        // server-side identity branch is skipped and only the header-announced consume
+        // path can pick up the parent link (#1356 review blocker). No x-acp-session.
+        const piHeaders = { "x-bili-plugin": "pi", "x-bili-plugin-conversation": childConv };
+        const childReply = await chat(url, [{ role: "user", content: `run ${run} child first turn: ${FILLER.repeat(12)}` }], "", piHeaders);
+        assert.ok(childReply.length > 0, "child turn must produce a reply");
+
+        const child = newSessions().find((s) => s.id !== parent.id);
+        assert.ok(child, "child conversation must resolve to its own session");
+        assert.equal(child.metadata.derivedFromSessionId, parent.id, "header-announced child records the parent session link");
+        assert.equal(child.metadata.derivedFrom, parentConv, "child records the parent conversation id");
+        assert.equal(child.state.blocks.filter((b) => b.active).length, 0, "no state is copied into the child");
+
+        // The user-visible defect of #1333 on the real wire shape: decompress from
+        // the child serves the parent's folded content read-only.
+        const dec = await fetch(`http://127.0.0.1:${proxyPort}/__bili/plugin/tool`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversationId: childConv, tool: "decompress", args: { blockId } }),
+        });
+        const decJson = JSON.parse(await dec.text()) as { ok: boolean; result?: string };
+        assert.ok(decJson.ok, `decompress via plugin tool API failed: ${JSON.stringify(decJson)}`);
+        assert.match(decJson.result ?? "", new RegExp(`read-only from derived session ${parent.id}`), "decompress must fall back to the parent");
+    } finally {
+        await close(proxy);
+        await close(relay);
+    }
+});
+
+test("register landing after the child's first request still links late (#1362)", async () => {
+    _reset_for_test();
+    _setStoreForTest(new SessionStore({ enabled: false }));
+    setRegistryForTest({});
+    const run = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const parentConv = `pfa-parent-${run}`;
+    const childConv = `pfa-child-late-${run}`;
+
+    const state: RelayState = { upstreamReqs: [], compressed: false };
+    const relay = startMockUpstream(state);
+    await listen(relay);
+    const relayPort = (relay.address() as { port: number }).port;
+    const proxy = await startServer(proxyOpts(relayPort));
+    await listen(proxy);
+    const proxyPort = (proxy.address() as { port: number }).port;
+    const url = `http://127.0.0.1:${proxyPort}/bili/http://127.0.0.1:${relayPort}/v1/chat/completions`;
+
+    const preExisting = new Set(listSessions().map((s) => s.id));
+    const newSessions = () => listSessions().filter((s) => !preExisting.has(s.id));
+    try {
+        const history: ChatMsg[] = [];
+        for (let i = 1; i <= 8; i++) {
+            history.push({ role: "user", content: `run ${run} parent turn ${i}: ${FILLER.repeat(12)}` });
+            const reply = await chat(url, history, parentConv);
+            history.push({ role: "assistant", content: reply });
+        }
+        const parent = newSessions()[0]!;
+        assert.ok(parent.state.blocks.filter((b) => b.active).length >= 1, "parent must have a folded block");
+
+        // The extension flips tools-ready BEFORE the register POST completes, so the
+        // child's first model request can reach the proxy before any register exists.
+        const piHeaders = { "x-bili-plugin": "pi", "x-bili-plugin-conversation": childConv };
+        const firstTurn = [{ role: "user", content: `run ${run} child first turn: ${FILLER.repeat(12)}` }] as ChatMsg[];
+        const reply1 = await chat(url, firstTurn, "", piHeaders);
+        assert.ok(reply1.length > 0, "child first turn must produce a reply");
+        let child = newSessions().find((s) => s.id !== parent.id);
+        assert.ok(child, "child conversation must resolve to its own session");
+        assert.equal(child.metadata.derivedFromSessionId, undefined, "no register yet — nothing to link");
+
+        const reg = await fetch(`http://127.0.0.1:${proxyPort}/__bili/plugin/register`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversationId: childConv, agent: "pi", identity: true, parentConversationId: parentConv }),
+        });
+        assert.ok(reg.ok, "late register must succeed");
+
+        // Second request of the same session re-derives the parent and records the
+        // link even though this is no longer the session's first request.
+        firstTurn.push({ role: "assistant", content: reply1 });
+        firstTurn.push({ role: "user", content: `run ${run} child second turn: ${FILLER.repeat(12)}` });
+        const reply2 = await chat(url, firstTurn, "", piHeaders);
+        assert.ok(reply2.length > 0, "child second turn must produce a reply");
+        child = newSessions().find((s) => s.id !== parent.id);
+        assert.equal(child?.metadata.derivedFromSessionId, parent.id, "link recorded on the second request (late-link guard)");
+        assert.equal(child?.metadata.derivedFrom, parentConv);
+    } finally {
+        await close(proxy);
+        await close(relay);
+    }
+});
+>>>>>>> f222c96 (fix: consume parentConversationId for header-announced plugin sessions (#1362))
