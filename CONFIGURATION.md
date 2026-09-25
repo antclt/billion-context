@@ -601,7 +601,8 @@ Environment variables take precedence over the config file. They are useful for 
 | ~~`BILI_HOST_USAGE_CREDIT`~~ / ~~`hostUsageCredit`~~ | **Removed in #660.** Used to select the host-facing usage mode. The #408 uncompressed-baseline backfill is gone entirely — every host now reports the actually-forwarded (post-fold) request as provider-measured (matches `[acp-usage] input=`). Old values left in env or the config file are ignored; remove them. See the "Bug history lesson" section of PR #691. |
 | `ACP_PROVIDERS` | Path to an external `providers.json` (legacy / shared file). |
 | `BILI_REPLAY_RETRY_BASE_MS` | Base backoff delay (ms) for acp-loop replay retries after a transient upstream rejection (default `1500`; set `0` to disable the delay). See #189. |
-| `BILI_REPLAY_RETRY_MAX` | Total attempts for acp-loop replay retries (default `3`; set `1` to disable retries entirely — legacy fail-fast behavior). See #189. |
+| `BILI_REPLAY_RETRY_MAX` | Total attempts for acp-loop replay retries (default `3`; set `1` to disable retries entirely — legacy fail-fast behavior). See #189. Applies to both transient HTTP failures and #1263 fail-fast network failures (pre-response reset/refused — proxy-recycle class), never to timeout/abort kinds. |
+| `BILI_PROXY_KEEPALIVE_MAX_MS` | Keep-alive reuse ceiling (ms) for connections through an upstream proxy (default `55000`). Common proxies recycle idle tunnels on a ~60s cadade; capping our reuse window below that trades a few reconnects for the classic "first request after idle dies with ECONNRESET" failure (#1263). `0` = uncapped (undici defaults). Direct (non-proxied) connections are unaffected. |
 | `BILI_UPSTREAM_TIMEOUT_MS` | Idle budget (ms) for upstream requests: time-to-first-byte and time between body chunks (default `720000` = 12 min). A healthy stream that keeps producing chunks is never cut mid-flight; a silent one is. The same value drives the underlying HTTP client's transport timeouts, so this single knob bounds long local-model prefills end-to-end (#551). |
 | `ACP_SESSION_HEADER` | Conversation-id header name (default `x-acp-session`). |
 | `ACP_REASONING_KEEP` | Responses API only: set `none` to drop all reasoning items. Default routes reasoning through the compression pipeline so it is hidden automatically once its turn is summarized (prevents the unbounded accumulation that broke Codex's prompt-cache prefix). |
@@ -640,6 +641,27 @@ Environment variables take precedence over the config file. They are useful for 
 | `BILI_CODEX_COMPACT` | Codex native-compaction handling. Default `intercept`: bili intercepts codex's compaction requests and forges a local handoff to the ACP state when the safety gate passes (transform ok + steady-state usage < 90% of the window + at least one active compressed block) — trigger form forges a 2-frame SSE, endpoint form forges `{output}` — and never contacts upstream. Forged ACP summaries are re-injected as a history-borne handoff message (developer-message fallback) so compressed content stays visible after codex truncates its history. Set `pass` to opt out and forward codex's compaction requests upstream (native compaction backstops). On any gate failure the request passes through untouched. |
 
 ---
+
+## Upstream Failure Diagnostics (proxied upstreams)
+
+Every upstream transport failure is classified into a `kind=` that leads its log line (and the `error:` string clients/status see), each with a remediation hint (`hint=...`). The taxonomy (#1263):
+
+| kind | meaning | bili behavior |
+|------|---------|---------------|
+| `client-abort` | downstream client disconnected | nothing (request dead by definition) |
+| `upstream-timeout` | idle budget expired or connect timed out | **not retried** — never stack wait budgets |
+| `proxy-reset` | connection died pre-response **through a proxy** (prime suspect: proxy idle-recycle / payload cap / node churn) | one transparent replay, bounded by `BILI_REPLAY_RETRY_MAX` |
+| `upstream-reset` | same, direct connection (suspect upstream/local network) | one transparent replay |
+| `connect-refused` | TCP refused (the proxy when configured, else upstream) | one transparent replay |
+| `dns` / `tls` / `unknown` | resolution / handshake / unclassified | not retried |
+
+Handshake-class resilience is paired with a keep-alive cap for proxied connections (`BILI_PROXY_KEEPALIVE_MAX_MS`, default 55s) so bili stops offering proxies sockets they are about to recycle.
+
+**Four-step checklist** when long sessions show periodic connection failures (from #1249):
+1. Grep `bili.log` for `kind=` — `proxy-reset` clusters implicate the external proxy; `upstream-timeout` implicates upstream health.
+2. Align timestamps of the failing requests with the external proxy's own access log (same host clock) — a recycle entry at the same millisecond closes the case.
+3. Confirm which hop: `proxy=<url>` vs `proxy=direct` in the same line; check request body size (`content-length` of the forwarded request) against the proxy's documented payload cap.
+4. If the proxy is the recycler, either raise its idle timeout or leave bili's 55s reuse cap + one-replay safety net to absorb it.
 
 ## CLI Reference
 
