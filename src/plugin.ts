@@ -263,6 +263,28 @@ export function recordPluginSession(conversationId: string, sessionId: string): 
  *  sees the exact refs the model was shown (mirrors the wire-mode loop, which
  *  runs executeProxyTool against prepared.processedMessages). */
 export function rememberPluginMessages(sessionId: string, processed: CoreMessage[], original: CoreMessage[], nudge?: NudgeDecision): void {
+    // #1307: auxiliary requests (auto-review / classifier prompts) bound to the
+    // same session key can carry a normal output budget and any message count,
+    // so both the ≤200 heuristic and size-based guards are proxies that a new
+    // host shape walks through. The causal signal is IDENTITY: a main turn
+    // RESENDS the conversation, so it always carries messages the previous
+    // snapshot already holds (content-hash ids are stable); an auxiliary
+    // prompt shares NOTHING with it by construction. A zero-overlap view that
+    // is also smaller than the snapshot is therefore not a continuation —
+    // refuse to evict (the tool API anchors compress ranges from this
+    // snapshot; losing it dangles every long-session ref). Known cost: a
+    // genuine restart on the same session id keeps the stale snapshot for one
+    // round; the next resending turn self-heals. Fresh sessions and larger or
+    // overlapping views always write.
+    const incoming = processed.length > 0 ? processed : original;
+    const previous = remembered.get(sessionId);
+    if (previous) {
+        const previousView = previous.processed.length > 0 ? previous.processed : previous.original;
+        if (previousView.length > incoming.length) {
+            const knownIds = new Set(previousView.map((m) => m.id));
+            if (!incoming.some((m) => knownIds.has(m.id))) return;
+        }
+    }
     const staleSessionIds = new Set(
         [...remembered.keys()].filter((id) => id === sessionId || !peekSession(id)),
     );
@@ -2319,4 +2341,8 @@ export function _resetPluginStateForTest(): void {
     registeredIds.clear();
     pluginRuntimeTable.clear();
     warnedNoModelRequests.clear();
+}
+
+export function _rememberedForTest(): Map<string, RememberedMessages> {
+    return remembered;
 }
