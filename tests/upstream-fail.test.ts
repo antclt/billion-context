@@ -121,6 +121,37 @@ test("fetchWithRetry: idle-budget timeout is NOT replayed (#1263 — never stack
     }
 });
 
+test("fetchWithRetry: BILI_REPLAY_RETRY_MAX=1 keeps legacy fail-fast for network failures (#1263)", async () => {
+    _resetFetchUtilForTest();
+    const prev = process.env.BILI_REPLAY_RETRY_MAX;
+    process.env.BILI_REPLAY_RETRY_MAX = "1";
+    let hits = 0;
+    const upstream = http.createServer((req, res) => {
+        hits += 1;
+        res.destroy();
+    });
+    await listen(upstream);
+    const port = (upstream.address() as { port: number }).port;
+    const retries: unknown[] = [];
+    try {
+        await assert.rejects(
+            fetchWithRetry(
+                `http://127.0.0.1:${port}/v1/messages`,
+                { method: "POST", body: "{}" },
+                5000,
+                undefined,
+                (info) => retries.push(info),
+            ),
+        );
+        assert.equal(hits, 1, "legacy fail-fast: no replay when the retry budget is 1");
+        assert.equal(retries.length, 0);
+    } finally {
+        if (prev === undefined) delete process.env.BILI_REPLAY_RETRY_MAX;
+        else process.env.BILI_REPLAY_RETRY_MAX = prev;
+        await close(upstream);
+    }
+});
+
 test("fetchWithRetry: external abort is never replayed", async () => {
     _resetFetchUtilForTest();
     const upstream = http.createServer((req, res) => {
