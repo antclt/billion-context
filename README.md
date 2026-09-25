@@ -3,9 +3,9 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-<strong>Context-compression plugin</strong> for all agents — pi, OpenCode, Codex, Claude Code, and more
+<strong>Context-compression plugin</strong> — small context windows (a 100K context is enough), <em>5x fewer tokens</em>, month-long single sessions (billions of tokens), and compression quality
 <br />
-Small context windows (a 100K context is enough), <em>5x fewer tokens</em>, and month-long single sessions (billions of tokens). <em>billion-context is all you need.</em>
+For all agents: pi, OpenCode, Codex, Claude Code, and more. <em>billion-context is all you need.</em>
 </p>
 
 ---

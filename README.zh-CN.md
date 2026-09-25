@@ -5,7 +5,7 @@
 <p align="center">
 面向所有主流编程助手的<strong>上下文压缩插件</strong> —— pi、OpenCode、Codex、Claude Code 等
 <br />
-小窗口够用(100k 上下文足矣)、<em>省 5 倍 token</em>、数月级几十亿 token 单会话。<em>billion-context is all you need。</em>
+兼顾小窗口(100k 上下文足矣)、<em>省 5 倍 token</em>、超长会话(十亿级别单会话)、压缩质量。<em>billion-context is all you need。</em>
 </p>
 
 ---
