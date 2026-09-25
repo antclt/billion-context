@@ -2176,6 +2176,7 @@ export async function pipePluginResponsesWithStrip(
                             continue;
                         }
                         if (!mayStartRenderTag(v) && !argAnyPending() && !tagFilter.pending()) {
+                            proseAcc += v;
                             await write(rawEvent + "\n\n");
                             continue;
                         }

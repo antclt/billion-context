@@ -189,6 +189,33 @@ test("plugin responses passthrough warns once on tool-call-shaped XML in output_
     assert.ok(warns[0].includes("[sess-r1368]"), warns[0]);
 });
 
+test("plugin responses passthrough warns on tool-call-shaped XML in reasoning summary deltas alone (#1368)", async () => {
+    // Stream ends after the delta - no done-family or completion frame - so the
+    // delta's own accounting is the ONLY prose source: this pins the fast-path
+    // accumulation the done-family path cannot cover.
+    const out: string[] = [];
+    const logs: string[] = [];
+    setLogCapture((_level, msg) => logs.push(msg));
+    try {
+        const events = [
+            sse({ type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_1" } }),
+            sse({ type: "response.reasoning_summary_part.added", item_id: "rs_1", summary_index: 0, part: { type: "summary_text", text: "" } }),
+            sse({ type: "response.reasoning_summary_text.delta", item_id: "rs_1", summary_index: 0, delta: `draft ${FRAG} end` }),
+        ];
+        await pipePluginResponsesWithStrip(streamOf(events), makeRes(out), makeSession("sess-rs1368", "responses"));
+    } finally {
+        setLogCapture(null);
+    }
+    let deltaText = "";
+    for (const ev of dataLines(out.join(""))) {
+        if (ev["type"] === "response.reasoning_summary_text.delta" && typeof ev["delta"] === "string") deltaText += ev["delta"];
+    }
+    assert.equal(deltaText, `draft ${FRAG} end`, "decoded reasoning summary forwarded verbatim");
+    const warns = logs.filter((l) => l.includes(WARN));
+    assert.equal(warns.length, 1, `expected exactly one warn, got: ${logs.join(" | ")}`);
+    assert.ok(warns[0].includes("[sess-rs1368]"), warns[0]);
+});
+
 test("plugin passthrough does not warn on plain prose (#1368)", async () => {
     const out: string[] = [];
     const logs: string[] = [];
