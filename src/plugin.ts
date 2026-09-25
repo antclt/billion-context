@@ -1,4 +1,4 @@
-import { type CompressionCore, type Config, type CoreMessage, type NudgeDecision, defaultCountTokens } from "acp-kernel";
+import { type CompressionCore, type Config, type CoreMessage, type NudgeDecision, countMessageTokens } from "acp-kernel";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { fileURLToPath } from "node:url";
 import type { ServerResponse } from "node:http";
@@ -783,8 +783,10 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
             state: session.state,
             nudge,
             modelContextLimit,
+            // #1320: countMessageTokens includes host-projected thinking mass
+            // (signature-only blocks) on the same scale as the breakdown rows.
             unprunedTokens: mem && mem.original.length > 0
-                ? mem.original.reduce((sum, m) => sum + defaultCountTokens(m.text ?? ""), 0) + systemPromptTokens
+                ? mem.original.reduce((sum, m) => sum + countMessageTokens(m), 0) + systemPromptTokens
                 : undefined,
         });
     } catch {

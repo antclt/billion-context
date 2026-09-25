@@ -114,7 +114,7 @@ import { bodyDumpEnabled, getUnrecognizedPathStats, isModelDiscoveryPath, logDum
 import { BILI_HOP_HEADER, anthropicBetaContextWindow, LAUNCHER_MODEL_WINDOWS, LAUNCHER_MODEL_MAX_OUTPUTS, launcherContextWindow, launcherMaxOutput, parseLauncherModelWindows, windowSourceLogged } from "./server/context-window.js";
 import { buildForwardHeaders, connectionNamedHeaders, NO_IDENTITY_MESSAGE, RESPONSE_ONLY_STRIP_HEADERS, safeSessionId, UPSTREAM_HOP_HEADERS } from "./server/headers.js";
 import { isSideRequest, outputBudgetField, restoreOutputBudget, SIDE_REQUEST_MAX_TOKENS, sideRequestGuard } from "./server/side-request.js";
-import { clampOutgoingOutput, countSystemAndToolsTokens, emergencyNudge, estimateInputTokens, estimateWireOverhead } from "./server/budget.js";
+import { clampOutgoingOutput, countSystemAndToolsTokens, emergencyNudge, estimateInputTokens, estimateWireOverhead, projectThinkingMass } from "./server/budget.js";
 import { awaitDrain, bufferToStream, dumpStreamToFile, pipeThrough, readStreamToBuffer } from "./server/stream-io.js";
 import { artifactSeedHit, detectAcpArtifacts } from "./server/chain-artifacts.js";
 import { droppedOpenaiParts } from "./wire-drop-warn.js";
@@ -2570,6 +2570,18 @@ async function prepareAnthropic(
     try {
         const { msgs, cacheControls } = anthropicToCore(parsed);
         originalMessages = msgs;
+        // #1320: signature-only thinking blocks bill restored thinking tokens upstream
+        // but project as empty text locally — attribute the provider-vs-local residual
+        // to them so every meter sees the billed context (metering-only, wire untouched).
+        const inboundImageTokens = imageTokensInParsedBody("anthropic", parsed, imageBillingFor(opts, upstreamOrigin));
+        projectThinkingMass(msgs, {
+            providerInputTokens: session.stats.lastInputTokens,
+            measured: session.stats.lastInputTokensSource === "usage",
+            systemText: extractSystem(parsed.system),
+            tools: parsed.tools,
+            imageTokens: inboundImageTokens,
+            storedOverhead: typeof session.metadata.systemPromptTokens === "number" ? session.metadata.systemPromptTokens : undefined,
+        });
         // #1001: pre-turn snapshot — processTurn below assigns fresh refs to every
         // previously-unknown id, which would make rewrite detection read 1.0.
         const knownRefsBefore = new Set(Object.keys(session.state.messageRefs.byRaw));
@@ -2586,7 +2598,7 @@ async function prepareAnthropic(
         // zero-baseline forks replay their FULL raw history with no measurement,
         // so feeding 0 blinds the nudge (usage 0%, growth ref 0) and no
         // compression trigger fires until overflow. See effectiveTokenCount.
-        const tokenCount = effectiveTokenCount(session, msgs, imageTokensInParsedBody("anthropic", parsed, imageBillingFor(opts, upstreamOrigin)));
+        const tokenCount = effectiveTokenCount(session, msgs, inboundImageTokens);
         const activeBefore = new Set(session.state.blocks.filter((b) => b.active).map((b) => b.blockId));
         // Absorb markers are injected by the kernel's processTurn from
         // config.absorb. With no channel to call the tool (injection off),
@@ -5464,4 +5476,4 @@ function logMsg(opts: ProxyOptions, level: string, msg: string): void {
 export { getUnrecognizedPathStats, logDumpFailure, logUnrecognizedPath } from "./server/observability.js";
 export { BILI_HOP_HEADER, parseLauncherModelWindows, anthropicBetaContextWindow } from "./server/context-window.js";
 export { isSideRequest, outputBudgetField, restoreOutputBudget, sideRequestGuard, type OutputBudgetField } from "./server/side-request.js";
-export { countSystemAndToolsTokens, estimateInputTokens, estimateWireOverhead, clampOutputBudget, emergencyNudge } from "./server/budget.js";
+export { countSystemAndToolsTokens, estimateInputTokens, estimateWireOverhead, clampOutputBudget, emergencyNudge, projectThinkingMass, type ThinkingMassInput } from "./server/budget.js";
