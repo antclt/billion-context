@@ -1154,7 +1154,7 @@ test("watcher route: shared proxies take watcher registrations, daemons refuse (
 // void with zero signal. Now the hook must WARN loudly on stderr while
 // staying non-destructive (the daemon keeps serving; its fate is the
 // operator's). Linux-only like the other hook e2es (fake claude walks /proc).
-test("hook e2e: attaching to a squatting daemon warns instead of staying silent (#1322)", { timeout: 180_000, skip: LIVE_E2E ? process.platform !== "linux" : liveSkip }, async () => {
+test("hook e2e: unarmed squatter on the pinned port is refused loudly, not silently attached (#1322/#1335)", { timeout: 180_000, skip: LIVE_E2E ? process.platform !== "linux" : liveSkip }, async () => {
     const distCli = path.resolve(import.meta.dirname, "..", "dist", "index.js");
     const distScript = path.resolve(import.meta.dirname, "..", "dist", "claude-native-bootstrap.js");
     ensureDistBuilt(distCli);
@@ -1212,9 +1212,16 @@ test("hook e2e: attaching to a squatting daemon warns instead of staying silent 
         while (!fs.existsSync(doneFile) && Date.now() - t0 < 60_000) await new Promise((r) => setTimeout(r, 250));
         assert.ok(fs.existsSync(doneFile), "hook completed");
         const stderr = fs.readFileSync(errFile, "utf8");
-        assert.match(stderr, /attaching to running proxy/, "hook attached to the squatting daemon");
-        assert.match(stderr, /WARNING:.*NO session-lifecycle watchdog/s, "#1322: refusal surfaced instead of silently voiding the contract");
-        assert.match(stderr, /\(#1322\)/, "warning cites the issue for operators");
+        // #1335 gate: the hook must REFUSE the lifecycle-less listener and say
+        // so — the old warn-but-attach behavior is what let #1322 happen.
+        assert.match(stderr, /refusing to attach/, "hook refused the squatting daemon");
+        assert.match(stderr, /NO session-lifecycle watchdog/s, "#1322: refusal surfaced instead of silently voiding the contract");
+        assert.match(stderr, /\(#1322\/#1335\)/, "warning cites the issues for operators");
+        assert.match(stderr, /native\.attachExternal=true/, "escape hatch surfaced");
+        // strictPort launch cannot self-host (the squatter owns the port), so
+        // bring-up fails fast with an actionable kill/attach-anyway hint.
+        assert.match(stderr, /bring-up failed.*lifecycle-less/s, "pinned-port fast-fail explains itself");
+        assert.match(stderr, /Kill that process \(kill \d+\)/, "actionable kill hint");
         // Non-destructive: killing the session must NOT take the daemon down.
         killPid(claudePid);
         claudePid = 0;
