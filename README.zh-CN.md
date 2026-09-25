@@ -3,9 +3,9 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-AI 编程助手的<strong>通用上下文压缩代理</strong>
+面向所有主流编程助手的<strong>上下文压缩插件</strong> —— pi、OpenCode、Codex、Claude Code 等
 <br />
-任何能设置 base URL 的助手 —— <em>无需为每个助手写适配代码</em>。
+兼顾小窗口(100k 上下文足矣)、<em>省 5 倍 token</em>、超长会话(十亿级别单会话)、压缩质量。<em>billion-context is all you need。</em>
 </p>
 
 ---
