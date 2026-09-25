@@ -1162,6 +1162,35 @@ recommended** for many concurrent conversations because of the collision
 risk — until pi grows its own session-id signal. For pi multi-agent use,
 pass an explicit `x-acp-session` header per conversation to avoid collisions.
 
+### Derived (child) sessions inherit the parent's compressed context (#1333, #1362)
+
+When an agent spawns a child session — a subagent or fork that starts from an
+empty history instead of resending the parent's conversation — that child
+could not previously `decompress` or `search_context` content that was folded
+away in the parent. Each lane now reports the lineage at birth: its identity
+registration carries the parent's conversation id (`parentConversationId`),
+and the proxy records a read-only link (`derivedFrom`) on the child session.
+From then on:
+
+- `decompress` / `search_context` fall back along the parent chain for
+  content the child never saw itself (resident or on-disk parents,
+  cycle-guarded, depth cap 8);
+- nothing is copied into the child's state and the parent is never modified —
+  fallback hits are read-only, so a child can never clobber what the parent
+  still owns;
+- if the parent is unknown to the proxy when the link is recorded, the child
+  simply starts fresh.
+
+| Lane | Parent signal |
+|---|---|
+| **pi** RLM inline spawn | `parentSession` in the session header (path to the parent session file, resolved to its session id) |
+| **omp** fork / newSession | `parentSession` in the session header (bare session id or file path — both accepted) |
+| **OpenCode V1** (native plugin) | SDK session info `parentID` (resolved once per session, cached) |
+| **OpenCode V2** (native plugin) | `session.created` event `data.parentID` |
+
+claude/codex/dsh need nothing here: they share one session id across
+subagents or have no child-session concept at all.
+
 ### Windows: exclude the sessions dir from antivirus (#362)
 
 The proxy persists each session's compression state to the sessions dir

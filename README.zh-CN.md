@@ -525,6 +525,23 @@ Windows 下会自动发现常见 Clash/Mihomo 静态系统代理;Web UI 会显�
 
 **建议:** Codex 和 OpenCode 可以安全地通过代理并发跑很多会话。pi 单个 agent 没问题,但因碰撞风险**不建议**并发多会话 —— 直到 pi 自己长出 session-id 信号。pi 多 agent 场景下,每个会话发一个显式 `x-acp-session` header 来避免碰撞。
 
+### 派生(子)会话继承父会话的压缩上下文(#1333、#1362)
+
+当 agent 派生子会话 —— 子 agent 或 fork,从空历史起步、不重发父会话的内容 —— 该子会话此前无法 `decompress` / `search_context` 到父会话里折叠过的内容。现在各 lane 会在出生时上报这条血缘:向代理注册身份时携带父会话 id(`parentConversationId`),代理在子会话上记录一条只读链接(`derivedFrom`)。此后:
+
+- 子会话自己从未见过的内容,`decompress` / `search_context` 会沿父链回退(驻留或磁盘上的父会话,带环检测、深度上限 8);
+- 任何东西都不会被复制进子会话状态,父会话也绝不被修改 —— 回退命中一律只读,子会话不可能覆盖父会话仍持有的内容;
+- 若记录链接时代理不认识该父会话,子会话就按全新会话起步。
+
+| Lane | 父会话信号 |
+|---|---|
+| **pi** RLM inline spawn | 会话 header 里的 `parentSession`(父会话文件路径 → 解析为其会话 id) |
+| **omp** fork / newSession | 会话 header 里的 `parentSession`(裸会话 id 或文件路径,两种都接受) |
+| **OpenCode V1**(原生插件) | SDK 会话信息的 `parentID`(按会话解析一次并缓存) |
+| **OpenCode V2**(原生插件) | `session.created` 事件的 `data.parentID` |
+
+claude/codex/dsh 不需要这个机制:它们要么子 agent 共享同一个会话 id,要么根本没有子会话概念。
+
 ### Windows：把会话目录加入杀软排除项（#362）
 
 代理把每个会话的压缩状态持久化到会话目录（默认 `%USERPROFILE%\.local\share\billion-context\`），长会话每一轮都会重写该文件。在 Windows 上，实时杀毒（Windows Defender）、搜索索引器或同步工具（OneDrive）可能在写入中途锁住该目录，导致 rename 以 `EPERM` 失败，在锁解除前该会话的每次持久化都会失败。
