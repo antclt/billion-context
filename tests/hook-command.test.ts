@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { portableHookCommand } from "../src/plugin-install.ts";
+import { isOursSessionStartEntry, portableHookCommand } from "../src/plugin-install.ts";
 
 // The SessionStart hook is the one place bili hands a client a SHELL STRING
 // rather than an argv array, so the client's shell re-parses our path. The unit
@@ -63,6 +63,20 @@ test("portableHookCommand: no arguments, and the bare `node` the kimi hook uses"
     const kimi = portableHookCommand("node", ["C:\\Users\\u\\.kimi\\plugins\\managed\\billion-context\\dist\\kimi\\bootstrap-hook.js"]);
     assert.equal(kimi, "node C:/Users/u/.kimi/plugins/managed/billion-context/dist/kimi/bootstrap-hook.js");
     assert.ok(!kimi.startsWith("& "), kimi);
+});
+
+test("isOursSessionStartEntry still matches every form the installer can emit", () => {
+    // Uninstall/reinstall detection keys off this regex; if it drifts from the
+    // emitted spelling, bili stops recognizing its own hook and leaves orphans.
+    const entry = (cmd: string) => ({ hooks: [{ command: cmd }] });
+    for (const cmd of [
+        portableHookCommand(EXE, [JS]),
+        portableHookCommand(EXE, ["C:\\a b\\c\\claude-native-bootstrap.js"]),
+        portableHookCommand("C:\\Program Files\\nodejs\\node.exe", ["C:\\a b\\c\\claude-native-bootstrap.js"]),
+    ]) {
+        assert.equal(isOursSessionStartEntry(entry(cmd)), true, cmd);
+    }
+    assert.equal(isOursSessionStartEntry({ hooks: [{ command: "echo hi" }] }), false);
 });
 
 interface Shell {
