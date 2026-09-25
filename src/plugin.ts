@@ -275,8 +275,6 @@ export function rememberPluginMessages(sessionId: string, processed: CoreMessage
     const previous = remembered.get(sessionId);
     const previousCount = previous ? (previous.processed.length > 0 ? previous.processed : previous.original).length : 0;
     if (incoming.length <= 2 && previousCount > incoming.length) {
-        remembered.delete(sessionId);
-        remembered.set(sessionId, previous!);
         return;
     }
     const staleSessionIds = new Set(
