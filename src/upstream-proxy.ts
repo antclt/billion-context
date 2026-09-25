@@ -348,7 +348,6 @@ export function proxyDispatcher(proxyUrl: string | undefined, timeoutMs?: number
             if (ka > 0) {
                 capped.keepAliveTimeout = Math.min(typeof capped.keepAliveTimeout === "number" ? capped.keepAliveTimeout : ka, ka);
                 capped.keepAliveMaxTimeout = ka;
-                capped.keepAliveMaxTimeoutCap = ka;
             }
             return capped;
         };
