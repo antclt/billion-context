@@ -1,5 +1,6 @@
 import {
     collectBlockContent,
+    markBlockRestoredInline,
     parseBoundary,
     retrieveByRef,
     retrievedMessageId,
@@ -110,6 +111,18 @@ export function resolveDecompress(
         const collected = collectBlockContent(ctx.session.state, block, ctx.compressMessages ?? ctx.messages, { full });
         body = collected.text || block.summary;
         count = collected.count;
+    }
+
+    // #398/#403 refold wiring: a successful FULL-BLOCK restore (this path —
+    // default one-level view or full) hands the block's re-summarization
+    // material back to the model via this tool result, and the client keeps
+    // tool results in its re-sent history. Mark the block so a later compress
+    // of the same span refolds it in place instead of bouncing off "already
+    // compressed". Range restores (startId/endId) return partial content and
+    // must NOT flip the flag; inactive blocks can never refold.
+    if (block.active && !block.restoredInline) {
+        ctx.session.state = markBlockRestoredInline(ctx.session.state, blockId).state;
+        markDirty(ctx.session);
     }
 
     const header = `[Block ${blockId} content — ${count} item(s)${full ? ", full" : ""}]`;
