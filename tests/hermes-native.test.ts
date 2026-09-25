@@ -214,7 +214,7 @@ for k in ("BILLION_CONTEXT_ATTACH", "BILLION_CONTEXT_PROXY", "BILI_NATIVE_HERMES
           "ALL_PROXY", "all_proxy", "HERMES_CA_BUNDLE"):
     os.environ.pop(k, None)
 
-RECORDED = {"tool": [], "runtime_info": [], "watcher": []}
+RECORDED = {"tool": [], "runtime_info": [], "watcher": [], "health": []}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -229,7 +229,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/__bili/plugin/manifest":
+        if self.path == "/__bili/health":
+            RECORDED["health"].append(1)
+            mode = os.environ.get("BC_HEALTH_WATCHDOG", "armed")
+            if mode == "absent":
+                self._send({"ok": True})
+            else:
+                self._send({"ok": True, "watchdog": {"armed": mode == "armed", "watchers": []}})
+        elif self.path == "/__bili/plugin/manifest":
             self._send({"version": "test-1", "tools": {"anthropic": [
                 {"name": "compress", "description": "compress a range", "input_schema": {"type": "object"}},
                 {"name": "decompress", "description": "decompress a block", "input_schema": {"type": "object"}},
@@ -293,7 +300,14 @@ mod._reset_for_test()
 ctx = FakeCtx()
 out = {"scenario": SCENARIO, "origin": ORIGIN}
 
-if SCENARIO.startswith("gate-"):
+if SCENARIO.startswith("discover-"):
+    install_sidecar(SCENARIO == "discover-armed")
+    sd = os.path.join(os.environ["XDG_STATE_HOME"], "billion-context")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "proxy-origin"), "w") as f:
+        json.dump({"origin": ORIGIN, "pid": os.getpid(), "launchToken": "tok"}, f)
+    mod.register(ctx)
+elif SCENARIO.startswith("gate-"):
     flag = SCENARIO[len("gate-"):]
     envvar = {"opt-out": "BILI_NATIVE_HERMES", "plugin-0": "BILLION_CONTEXT_PLUGIN", "launcher-proxy": "BILLION_CONTEXT_PROXY"}[flag]
     os.environ[envvar] = "http://127.0.0.1:1" if envvar == "BILLION_CONTEXT_PROXY" else "0"
@@ -352,6 +366,8 @@ out.update({
     "tool_calls": RECORDED["tool"],
     "runtime_info": RECORDED["runtime_info"],
     "watcher_calls": RECORDED["watcher"],
+    "health_probes": len(RECORDED["health"]),
+    "refused": sorted(mod._state.get("refused") or []),
 })
 server.shutdown()
 print(json.dumps(out))
@@ -372,6 +388,8 @@ interface DriverOut {
     tool_calls: Array<Record<string, unknown>>;
     runtime_info: Array<Record<string, unknown>>;
     watcher_calls: Array<Record<string, unknown>>;
+    health_probes?: number;
+    refused?: string[];
     round1_none?: boolean;
     req_unmutated?: boolean;
     first_headers?: Record<string, string> | null;
@@ -455,6 +473,58 @@ describe("python plugin runtime (subprocess)", () => {
         assert.deepEqual(out!.tools_registered, ["acp_status", "compress", "decompress"]);
         assert.equal(out!.env_https_proxy, out!.origin);
         assert.equal(out!.watcher_calls.length, 1, "registration was attempted before failing open");
+    });
+
+    // #1338: the Python discovery path carries #1335's attach gate. The stub
+    // proxy-origin points at the fake listener; BC_HEALTH_WATCHDOG drives its
+    // /__bili/health watchdog field.
+    test("discover-armed: session attaches to a watchdog-armed shared proxy", () => {
+        if (!PY) {
+            console.warn("skip: no python3/python interpreter on this machine (hermes requires Python 3.11+)");
+            return;
+        }
+        const { out, err } = runDriver("discover-armed", { BC_HEALTH_WATCHDOG: "armed" });
+        assert.ok(out, err);
+        assert.equal(out!.env_https_proxy, out!.origin, "attached to the armed listener");
+        assert.equal(out!.watcher_calls.length, 1, "registered as a watchdog owner");
+        assert.deepEqual(out!.refused, [], "no refusal recorded");
+    });
+
+    test("discover-unarmed: lifecycle-less daemon is refused; falls through to a session-owned spawn (#1338)", () => {
+        if (!PY) {
+            console.warn("skip: no python3/python interpreter on this machine (hermes requires Python 3.11+)");
+            return;
+        }
+        const { out, err } = runDriver("discover-unarmed", { BC_HEALTH_WATCHDOG: "false" });
+        assert.ok(out, err);
+        assert.equal(out!.env_https_proxy, null, "never rode the daemon");
+        assert.deepEqual(out!.watcher_calls, [], "no watcher registration on a refused attach");
+        assert.deepEqual(out!.refused, [out!.origin], "refusal recorded once for operators");
+        assert.ok((out!.health_probes ?? 0) >= 1, "gate consulted the health watchdog field");
+        assert.deepEqual(out!.tools_registered, [], "spawn fallback failed (dummy sidecar) — plugin inert, not attached");
+    });
+
+    test("discover-absent: pre-#1330 build (no watchdog field) is unverifiable — refused like unarmed", () => {
+        if (!PY) {
+            console.warn("skip: no python3/python interpreter on this machine (hermes requires Python 3.11+)");
+            return;
+        }
+        const { out, err } = runDriver("discover-absent", { BC_HEALTH_WATCHDOG: "absent" });
+        assert.ok(out, err);
+        assert.equal(out!.env_https_proxy, null);
+        assert.deepEqual(out!.refused, [out!.origin], "unverifiable lifecycle is refused, matching pickAttachable");
+    });
+
+    test("discover-external: BILI_NATIVE_ATTACH_EXTERNAL=1 restores attach-to-daemon (#1338 escape hatch)", () => {
+        if (!PY) {
+            console.warn("skip: no python3/python interpreter on this machine (hermes requires Python 3.11+)");
+            return;
+        }
+        const { out, err } = runDriver("discover-unarmed", { BC_HEALTH_WATCHDOG: "false", BILI_NATIVE_ATTACH_EXTERNAL: "1" });
+        assert.ok(out, err);
+        assert.equal(out!.env_https_proxy, out!.origin, "escape hatch attaches to the unarmed daemon");
+        assert.equal(out!.watcher_calls.length, 1, "watcher registration still attempted (409-soft)");
+        assert.deepEqual(out!.refused, []);
     });
 
     for (const [scenario, extraEnv] of [

@@ -294,7 +294,8 @@ the next launch, so fixes take effect immediately instead of silently
 serving stale code.
 
 **The attach gate (#1335).** A native hook attaches to whatever answers on
-the port, so the three listener kinds get different treatment:
+the port, so the three listener kinds get different treatment (TS lanes and
+the hermes Python plugin's discovery path alike, #1338):
 
 | Listener | Lifecycle owner | Attach? |
 |---|---|---|
