@@ -10,7 +10,7 @@ import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.j
 import { effectiveRulesConfig, rulesEnabled } from "./rules-feature.js";
 import { executeProxyTool } from "./loop/core.js";
 import { normalizeSseLineEndings } from "./sse-util.js";
-import { composeStreamFilters, containsMarkerLineText, containsRenderTagText, createMarkerLineFilter, createTagEchoFilter, mayStartMarkerLine, mayStartRenderTag, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
+import { composeStreamFilters, containsMarkerLineText, containsRenderTagText, containsToolCallXmlFragment, createMarkerLineFilter, createTagEchoFilter, mayStartMarkerLine, mayStartRenderTag, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
 import { log as loggerLog } from "./logger.js";
 import { ccrEnabled, contentStoreOf, retrieveToolName } from "./store.js";
 import { imageUsageSuffix } from "./image-compress.js";
@@ -1180,6 +1180,9 @@ export async function pipePluginChatWithStrip(
     let sawToolUse = false;
     let sawThinking = false;
     let visibleTextChars = 0;
+    /** Post-filter prose of every attempt, for the once-per-request #361
+     *  tool-call-XML warn at stream end (#1368): warn only, never stripped. */
+    let proseAcc = "";
     /** Of that text, the chars released from a held markup span (the
      *  unclosed-tag case): markup the filter declined to swallow. A turn whose
      *  only visible output is this is as dead to the host as an empty one. */
@@ -1290,6 +1293,7 @@ export async function pipePluginChatWithStrip(
             const tail = s.filter.flush();
             if (tail.length > 0) {
                 out += syntheticTail(s, tail);
+                proseAcc += tail;
                 if (s.field === "content" || s.field === "text") {
                     visibleTextChars += tail.length;
                     releasedMarkupChars += tail.length;
@@ -1339,9 +1343,22 @@ export async function pipePluginChatWithStrip(
             log?.(msg);
         }
     };
+    // #1368: parity with the proxy pipe's #361 detector (src/server.ts) — model
+    // prose carrying tool-call-shaped XML (a call drafted as literal text) is
+    // logged once per request for attribution. Warn only: stripping is
+    // forbidden, a shape-based match cannot tell an echo from legitimate prose
+    // discussing such markup (#295/#361). Off the per-frame hot path by design.
+    const maybeWarnProtocolFragment = () => {
+        if (proseAcc.length === 0 || !containsToolCallXmlFragment(proseAcc)) return;
+        const who = session ? `[${session.id}] ` : "";
+        const msg = `[tag-echo] ${who}plugin passthrough: response text contains tool-call XML fragment (possible tag echo; not stripped)`;
+        loggerLog("warn", msg);
+        log?.(msg);
+    };
     const pushField = (field: string, index: number, text: string): [string, boolean] => {
         const s = filterFor(field, index);
         const clean = s.filter.push(text);
+        if (clean.length > 0) proseAcc += clean;
         return [clean, clean !== text];
     };
     const processOpenai = (ev: Record<string, unknown>, rawEvent: string): string => {
@@ -1372,7 +1389,10 @@ export async function pipePluginChatWithStrip(
                 hadText = true;
                 if (field !== "content" && v.length > 0) sawThinking = true;
                 if (!mayStartRenderTag(v) && !mayStartMarkerLine(v) && !anyPending()) {
-                    if (v.length > 0) keptText = true;
+                    if (v.length > 0) {
+                        keptText = true;
+                        proseAcc += v;
+                    }
                     if (field === "content") visibleTextChars += v.length;
                     continue;
                 }
@@ -1434,6 +1454,7 @@ export async function pipePluginChatWithStrip(
         const raw = d[field] as string;
         if (field === "thinking" && raw.length > 0) sawThinking = true;
         if (!mayStartRenderTag(raw) && !mayStartMarkerLine(raw) && !anyPending()) {
+            if (raw.length > 0) proseAcc += raw;
             if (field === "text" && raw.length > 0) visibleTextChars += raw.length;
             return rawEvent + "\n\n";
         }
@@ -1501,7 +1522,10 @@ export async function pipePluginChatWithStrip(
                 // shares held-back state.
                 const field = p["thought"] === true ? "thinking" : "text";
                 if (!mayStartRenderTag(raw) && !mayStartMarkerLine(raw) && !anyPending()) {
-                    if (raw.length > 0) keptText = true;
+                    if (raw.length > 0) {
+                        keptText = true;
+                        proseAcc += raw;
+                    }
                     if (field === "text") visibleTextChars += raw.length;
                     continue;
                 }
@@ -1636,6 +1660,7 @@ export async function pipePluginChatWithStrip(
         // stream completes, and those must already see this usage.
         settleUsage();
         maybeWarnDegenerate();
+        maybeWarnProtocolFragment();
         if (truncated) {
             emitUpstreamTruncation(res, protocol, finalFinishReason !== undefined, log);
             return;
@@ -1770,6 +1795,9 @@ export async function pipePluginResponsesWithStrip(
     let inRetry = false;
     /** Text the client actually assembled from this attempt's deltas. */
     let visibleTextChars = 0;
+    /** Post-filter prose for the once-per-request #361 tool-call-XML warn at
+     *  stream end (#1368): warn only, never stripped. */
+    let proseAcc = "";
     /** Done-family events held for the attempt in flight. */
     let heldEvents: string[] = [];
     /** Text those held events would hand the client, post-strip. */
@@ -1813,6 +1841,15 @@ export async function pipePluginResponsesWithStrip(
             log?.(msg);
         }
     };
+    // #1368: once-per-request #361 detector for the Responses pipe — see the
+    // chat-pipe twin above for the warn-only rationale (#295/#361).
+    const maybeWarnProtocolFragment = () => {
+        if (proseAcc.length === 0 || !containsToolCallXmlFragment(proseAcc)) return;
+        const who = session ? `[${session.id}] ` : "";
+        const msg = `[tag-echo] ${who}plugin passthrough: response text contains tool-call XML fragment (possible tag echo; not stripped)`;
+        loggerLog("warn", msg);
+        log?.(msg);
+    };
     let lastDeltaMeta: { item_id?: unknown; output_index?: unknown } | null = null;
     const flushTail = (after: string) => {
         const tail = tagFilter.flush();
@@ -1826,7 +1863,7 @@ export async function pipePluginResponsesWithStrip(
     /** Visible (post-strip) text a done-family event carries — what the client
      *  would assemble from it. It decides the turn's degeneracy together with
      *  the deltas already forwarded. */
-    const responsesEventTextLength = (ev: Record<string, unknown>): number => {
+    const responsesEventText = (ev: Record<string, unknown>): string => {
         let text = typeof ev["text"] === "string" ? (ev["text"] as string) : "";
         const part = ev["part"];
         if (part && typeof part === "object" && typeof (part as Record<string, unknown>)["text"] === "string") {
@@ -1841,7 +1878,7 @@ export async function pipePluginResponsesWithStrip(
                 }
             }
         }
-        return text.length;
+        return text;
     };
     /** Whether a serialized event must be rebuilt rather than forwarded: the
      *  retry's ids are rewritten in the parsed event, and a processor with
@@ -2027,6 +2064,7 @@ export async function pipePluginResponsesWithStrip(
                         const hadEcho = containsRenderTagText(jsonStr) || containsMarkerLineText(jsonStr);
                         if (hadEcho) sawStrippedEcho = true;
                         const evOut = hadEcho ? stripResponsesText(ev) : ev;
+                        proseAcc += responsesEventText(evOut);
                         const out = hadEcho ? rebuildEvent(rawEvent, evOut) : rawEvent + "\n\n";
                         await write(flushArgTails() + flushTail(out));
                         continue;
@@ -2042,7 +2080,9 @@ export async function pipePluginResponsesWithStrip(
                         let rebuild = hadEchoText || retryRewritePending();
                         if (rebuild) evOut = stripResponsesText(ev);
                         rewriteRetryIds(evOut);
-                        heldVisibleChars += responsesEventTextLength(evOut);
+                        const doneText = responsesEventText(evOut);
+                        heldVisibleChars += doneText.length;
+                        proseAcc += doneText;
                         heldEvents.push(rebuild ? rebuildEvent(rawEvent, evOut) : rawEvent + "\n\n");
                         continue;
                     }
@@ -2100,6 +2140,7 @@ export async function pipePluginResponsesWithStrip(
                             continue;
                         }
                         if (!retryRewritePending() && !mayStartRenderTag(delta) && !mayStartMarkerLine(delta) && !tagFilter.pending()) {
+                            proseAcc += delta;
                             await write(rawEvent + "\n\n");
                             continue;
                         }
@@ -2114,6 +2155,7 @@ export async function pipePluginResponsesWithStrip(
                             continue;
                         }
                         visibleTextChars += clean.length;
+                        proseAcc += clean;
                         if (clean === delta && !retryRewritePending()) {
                             await write(rawEvent + "\n\n");
                             continue;
@@ -2140,6 +2182,7 @@ export async function pipePluginResponsesWithStrip(
                         const s = argStreamFor(type, argField, ev);
                         const clean = s.filter.push(v);
                         if (clean.length === 0) continue;
+                        proseAcc += clean;
                         if (clean === v) {
                             await write(flushArgTails() + rawEvent + "\n\n");
                             continue;
@@ -2159,6 +2202,7 @@ export async function pipePluginResponsesWithStrip(
             if (rest.length > 0) await write(rest);
         }
         maybeWarnDegenerate();
+        maybeWarnProtocolFragment();
         settleUsage();
         // #721: same as the chat-pipe twin — never close bare on a missing
         // done-family event. Responses has no separate finish-reason concept
