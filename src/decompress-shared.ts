@@ -9,6 +9,7 @@ import {
     type CompressionState,
     type Config,
     type CoreMessage,
+    type InlineRestoreResult,
 } from "acp-kernel";
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -65,9 +66,12 @@ export type ProxyToolCtx = {
 /** Resolve a decompress request to a result string, honoring the `full` flag
  *  and the cross-round original-content cache on the session.
  *
- *  STATELESS RETRIEVAL: decompress is copy-paste — it changes no state. The
- *  block stays active, the forwarded view keeps folding, the cache is kept
- *  (repeat decompresses are free), and there is no expand/re-fold cycle.
+ *  STATELESS RETRIEVAL: decompress is copy-paste — the block stays active, the
+ *  forwarded view keeps folding, the cache is kept (repeat decompresses are
+ *  free), and there is no expand/re-fold cycle. The one exception is the
+ *  inline whole-block path, which additionally flags the block restoredInline
+ *  so a later compress may refold it in place (#1294 P2 / kernel K2) — a
+ *  sidecar flag only; ids and refs never move.
  *
  *  - If the block has cached originals (captured at compress time), use the
  *    cached `one` or `full` view per the flag. This is the cross-round-safe
@@ -139,7 +143,26 @@ export function resolveDecompress(
             return `${header}\n[Failed to write to ${outPath}: ${String(e)}]\n${safePrefix(body, 4000)}...`;
         }
     }
-    return `${header}\n${body}`;
+    // #1294 P2: inline whole-block restore — flag the block restoredInline
+    // (persisted via the NEW state) so a later compress refolds it in place
+    // (kernel K2), and end the result with the re-fold hint. The toFile path
+    // above returns before this point and stays byte-identical to before.
+    const marked = markBlockRestoredInline(ctx.session.state, blockId);
+    ctx.session.state = marked.state;
+    markDirty(ctx.session);
+    ctx.log(`[acp-decompress-inline] ${blockId}: flagged restoredInline${marked.result?.restoredStartRef ? ` (${marked.result.restoredStartRef}–${marked.result.restoredEndRef})` : ""}`);
+    return `${header}\n${body}\n\n${refoldHint(blockId, marked.result)}`;
+}
+
+// #1294 P2: close the loop on an inline restore — kernel K2 updates the
+// inline-restored block IN PLACE when re-compressed (same id, replaced
+// summary) instead of rejecting "already compressed". Degrades to a generic
+// hint when the kernel could not derive exact refs (e.g. multi-segment span).
+function refoldHint(blockId: string, result: InlineRestoreResult | null): string {
+    if (result !== null && result.restoredStartRef && result.restoredEndRef) {
+        return `Re-fold: call compress("${result.restoredStartRef}–${result.restoredEndRef}", <fresh summary>) → updates block ${blockId} in place (same id, new summary).`;
+    }
+    return `Re-fold: call compress over the restored messages with a fresh summary → updates block ${blockId} in place (same id, new summary).`;
 }
 
 type CoveredRefs = { raws: Array<{ raw: string; num: number }>; text: string };

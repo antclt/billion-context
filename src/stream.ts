@@ -185,6 +185,15 @@ function currentRefsSnapshot(ctx: RewriteCtx): string {
     return ` [Current context: ${ctx.messages.length} visible message(s), refs ${loId}–${hiId}, ${activeBlocks} active block(s). Refs restart at m00001 after a session-generation change — request only refs inside this span, or call acp_status for exact compressible ranges.]`;
 }
 
+// #1294 P1: one-line integrity fingerprint per created/updated block — exact
+// char length plus head/tail excerpts (newlines flattened to spaces) so the
+// model can verify its summary was stored intact without decompressing.
+export function summaryFingerprintLine(blockId: string, summary: string): string {
+    const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
+    const tail = summary.slice(-100).replace(/\r?\n/g, " ");
+    return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
+}
+
 export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: RewriteCtx): string {
     const { ranges, diagnostics } = parsed;
     if (ranges.length === 0) {
@@ -227,6 +236,7 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
             config: ctx.config,
         });
         const beforeIds = new Set(ctx.session.state.blocks.map((b) => b.blockId));
+        const beforeSummaries = new Map(ctx.session.state.blocks.map((b) => [b.blockId, b.summary] as const));
         ctx.session.state = res.state;
         // Cache original content for newly-created blocks. At compress time the
         // source messages are still in ctx.messages (this round's view, before
@@ -323,6 +333,13 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
 
         const warn = r.warnings.length > 0 ? ` ${r.warnings.join("; ")}` : "";
         let msg = `[Compressed ${detail} → ${r.blocksCreated} block(s), ~${r.tokensCompressed} tokens saved.${warn}]`;
+        // #1294 P1: append a fingerprint line per created/updated block —
+        // kernel refolds update an existing block's summary in place (same id),
+        // so "updated" means any pre-existing block whose summary changed.
+        for (const b of res.state.blocks) {
+            const prev = beforeSummaries.get(b.blockId);
+            if (prev === undefined || prev !== b.summary) msg += `\n${summaryFingerprintLine(b.blockId, b.summary)}`;
+        }
         // #189 staged compression (gated): a rewrite above the configured max
         // shrink is the shape that trips provider risk-control; steer the model
         // toward smaller, tail-biased ranges so the prefix (m00001..foldPoint)
