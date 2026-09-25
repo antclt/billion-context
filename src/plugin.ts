@@ -263,6 +263,22 @@ export function recordPluginSession(conversationId: string, sessionId: string): 
  *  sees the exact refs the model was shown (mirrors the wire-mode loop, which
  *  runs executeProxyTool against prepared.processedMessages). */
 export function rememberPluginMessages(sessionId: string, processed: CoreMessage[], original: CoreMessage[], nudge?: NudgeDecision): void {
+    // #1307: auxiliary requests (auto-review / classifier prompts) bound to the
+    // same session key can carry a normal output budget, so the ≤200
+    // side-request heuristic never fires and they walk the full pipeline with
+    // a 1-2 message synthetic view. That view must never evict the main turn's
+    // snapshot — the tool API anchors compress ranges from it, and losing it
+    // turns every long-session ref dangling ("cannot be anchored"). Only guard
+    // the shrink direction: a fresh session (no previous view) still writes,
+    // and a genuinely small main turn after an empty/small view still writes.
+    const incoming = processed.length > 0 ? processed : original;
+    const previous = remembered.get(sessionId);
+    const previousCount = previous ? (previous.processed.length > 0 ? previous.processed : previous.original).length : 0;
+    if (incoming.length <= 2 && previousCount > incoming.length) {
+        remembered.delete(sessionId);
+        remembered.set(sessionId, previous!);
+        return;
+    }
     const staleSessionIds = new Set(
         [...remembered.keys()].filter((id) => id === sessionId || !peekSession(id)),
     );
@@ -2319,4 +2335,8 @@ export function _resetPluginStateForTest(): void {
     registeredIds.clear();
     pluginRuntimeTable.clear();
     warnedNoModelRequests.clear();
+}
+
+export function _rememberedForTest(): Map<string, RememberedMessages> {
+    return remembered;
 }
