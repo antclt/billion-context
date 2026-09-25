@@ -193,6 +193,20 @@ export type CompressSettings = {
      *  match like kernel tool patterns (exact name or `*` glob). Deepest
      *  level wins (global → provider → model), whole-array replace. */
     neverPreserveRecentTools?: string[];
+    /** Tool-name patterns REMOVED from the effective recent-zone exclusion
+     *  list — the positive-facing knob: "protect these tools in the recent
+     *  zone" without restating the built-in list (kernel
+     *  `preserveRecentTools`, acp-kernel >= 0.0.93). Effective exclusion =
+     *  `(neverPreserveRecentTools ?? kernel built-in) minus
+     *  preserveRecentTools`, so the #1198/#1277 batch-read fold→re-read
+     *  remedy is a one-entry `[
+     *  "read"]` that keeps following built-in list evolution — no hand-copied
+     *  list to go stale. Composable with an explicit `neverPreserveRecentTools`
+     *  (subtraction applies to it too). Unset/empty = no subtraction — NOT
+     *  the protect-everything hatch (that is `neverPreserveRecentTools: []`).
+     *  Patterns match like kernel tool patterns (exact name or `*` glob).
+     *  Deepest level wins (global → provider → model), whole-array replace. */
+    preserveRecentTools?: string[];
     /** Emit 📦/❌ ACP visibility markers after proxy tool executions
      *  (compress / decompress / search_context / acp_status) — both the marker
      *  line streamed to the client and the marker message re-injected into
@@ -1041,6 +1055,14 @@ export function parseCompressSettings(v: unknown): (CompressSettings & { injectT
         const v = obj.neverPreserveRecentTools;
         if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.trim().length === 0)) ok = false;
         else out.neverPreserveRecentTools = (v as string[]).map((x) => x.trim());
+    }
+    // preserveRecentTools is a pure no-op when empty, so — like the
+    // protectedTools knobs — an empty array is rejected (a bare [] here is
+    // almost certainly a typo for neverPreserveRecentTools: []).
+    if ("preserveRecentTools" in obj && obj.preserveRecentTools !== undefined) {
+        const v = obj.preserveRecentTools;
+        if (!Array.isArray(v) || v.length === 0 || v.some((x) => typeof x !== "string" || x.trim().length === 0)) ok = false;
+        else out.preserveRecentTools = (v as string[]).map((x) => x.trim());
     }
     if ("stripImages" in obj) {
         if (typeof obj.stripImages !== "boolean") ok = false;

@@ -331,7 +331,14 @@
 - **类型：** `string[]`（工具名模式）
 - **默认值：** 未设置 → 内置 `["decompress", "search_context", "read", "bash"]`（需 `acp-kernel` >= 0.0.92）
 - **状态：** ACTIVE
-- **说明：** 从软保护的最近区（`preserveRecentMessages`/`preserveRecentTokens`）中**排除**的工具名模式：匹配的工具结果在最近窗口内立即可压缩，不再等待超龄。内核默认让 `read`/`bash` 保持可压（它们是最大的可回收体量）—— 但正是这个默认值让批量读文件的工作流把刚读的文件立刻折掉，陷入「折叠→重读」死循环（#1198/#1277）。**推荐解法：只移除 `read`** —— `{ "compress": { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] } }` —— 让新读的文件留在最近区，之后按位置超龄回归可压（不同于 `protectedLatestTools` 会把最新一次 read 永久钉住）。请保留 `decompress`/`search_context` 在列表里：重新纳入它们会把刚恢复的大块内容钉死在最近区无法回收 —— 换一种病。**⚠ 空数组 `[]` 合法且表示什么都不排除**（最大保护逃生门）—— 与 `protectedTools`/`protectedLatestTools` 不同，空数组不会被拒绝；显式数组逐字替换默认列表，跨层级整体替换（最深层胜出）。
+- **说明：** 从软保护的最近区（`preserveRecentMessages`/`preserveRecentTokens`）中**排除**的工具名模式：匹配的工具结果在最近窗口内立即可压缩，不再等待超龄。内核默认让 `read`/`bash` 保持可压（它们是最大的可回收体量）—— 但正是这个默认值让批量读文件的工作流把刚读的文件立刻折掉，陷入「折叠→重读」死循环（#1198/#1277）。**推荐解法：只移除 `read`** —— `{ "compress": { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] } }` —— 让新读的文件留在最近区，之后按位置超龄回归可压（不同于 `protectedLatestTools` 会把最新一次 read 永久钉住）。不需要逐字替换语义时优先用更简单的正向形式 `preserveRecentTools: ["read"]` —— 见下一节。请保留 `decompress`/`search_context` 在列表里：重新纳入它们会把刚恢复的大块内容钉死在最近区无法回收 —— 换一种病。**⚠ 空数组 `[]` 合法且表示什么都不排除**（最大保护逃生门）—— 与 `protectedTools`/`protectedLatestTools` 不同，空数组不会被拒绝；显式数组逐字替换默认列表，跨层级整体替换（最深层胜出）。
+
+#### `preserveRecentTools`
+
+- **类型：** `string[]`（工具名模式）
+- **默认值：** 未设置 → 不做减法（`neverPreserveRecentTools` ?? 内置列表逐字生效；需 `acp-kernel` >= 0.0.93）
+- **状态：** ACTIVE
+- **说明：** `neverPreserveRecentTools` 的**正向配对旋钮**：从生效的最近区排除列表中**移除**的工具名模式。#1198/#1277 批量读文件「折叠→重读」死循环的解法由此变成一条配置 —— `{ "compress": { "preserveRecentTools": ["read"] } }` —— 既不用重述（也不用冻结一份很快过时的手抄）内置列表，还自动跟随内置列表演化。生效排除表 = `(neverPreserveRecentTools ?? 内置) 减 preserveRecentTools`；可与显式 `neverPreserveRecentTools` 组合（减法同样作用于显式列表）；通配后缀模式移除匹配项（`"bash*"` 移除 `bash`）。除非确实需要逐字替换语义，优先用本旋钮而不是改 never-list。**⚠ 空数组 `[]` 会被拒绝** —— 在这里是纯无操作，裸 `[]` 几乎必然是 `neverPreserveRecentTools: []`（最大保护逃生门）的笔误。与同族旋钮一样跨层级整体替换（最深层胜出）。
 
 #### `prompts`
 

@@ -56,6 +56,32 @@ test("resolveRequestConfig passes neverPreserveRecentTools onto the kernel Confi
     assert.equal(resolveRequestConfig(base, {}, undefined, "claude-test", 200000, {}).neverPreserveRecentTools, undefined);
 });
 
+test("parseCompressSettings accepts preserveRecentTools but rejects the empty no-op array", () => {
+    assert.deepEqual(parseCompressSettings({ preserveRecentTools: [" read "] })?.preserveRecentTools, ["read"]);
+    // [] is a pure no-op here — reject to catch the typo for neverPreserveRecentTools: [].
+    assert.equal(parseCompressSettings({ preserveRecentTools: [] }), undefined);
+    assert.equal(parseCompressSettings({ preserveRecentTools: [42] }), undefined);
+    assert.equal(parseCompressSettings({ preserveRecentTools: [""] }), undefined);
+});
+
+test("mergeCompress: preserveRecentTools deepest level wins", () => {
+    assert.deepEqual(
+        mergeCompress({ preserveRecentTools: ["bash"] }, { preserveRecentTools: ["read"] }, undefined).preserveRecentTools,
+        ["read"],
+    );
+    assert.equal(mergeCompress(undefined, undefined, undefined).preserveRecentTools, undefined);
+});
+
+test("resolveRequestConfig passes preserveRecentTools onto the kernel Config", () => {
+    assert.deepEqual(
+        resolveRequestConfig(defaultConfig(200000), {}, undefined, "claude-test", 200000, {
+            preserveRecentTools: ["read"],
+        }).preserveRecentTools,
+        ["read"],
+    );
+    assert.equal(resolveRequestConfig(defaultConfig(200000), {}, undefined, "claude-test", 200000, {}).preserveRecentTools, undefined);
+});
+
 // --- Kernel end-to-end: recent-zone membership flips with the list ---------
 
 function buildBody(): AnthropicRequestBody {
@@ -72,7 +98,7 @@ function buildBody(): AnthropicRequestBody {
     return body;
 }
 
-function foldReadTurn(neverList: string[] | undefined): { errors: string[]; blocksCreated: number; readCovered: boolean } {
+function foldReadTurn(neverList: string[] | undefined, preserveList?: string[]): { errors: string[]; blocksCreated: number; readCovered: boolean } {
     const core = createCore();
     const state = createInitialState();
     const config = {
@@ -81,6 +107,7 @@ function foldReadTurn(neverList: string[] | undefined): { errors: string[]; bloc
         preserveRecentTokens: 0,
         compress: { ...defaultConfig(200000).compress, minCompressRange: 0 },
         ...(neverList !== undefined ? { neverPreserveRecentTools: neverList } : {}),
+        ...(preserveList !== undefined ? { preserveRecentTools: preserveList } : {}),
     };
     const { msgs } = anthropicToCore(buildBody());
     const turn = core.processTurn({ messages: msgs, state, config, tokenCount: 9999, renderTags: "text-only" });
@@ -122,4 +149,24 @@ test("empty list []: same protection as removing read (max-protection escape hat
     assert.equal(out.blocksCreated, 0);
     assert.match(out.errors[0] ?? "", /protected/i);
     assert.ok(!out.readCovered);
+});
+
+test("kernel positive knob: preserveRecentTools [\"read\"] is the one-line remedy", () => {
+    const out = foldReadTurn(undefined, ["read"]);
+    assert.equal(out.blocksCreated, 0, "nothing folds — the read pair gained zone protection");
+    assert.match(out.errors[0] ?? "", /protected/i);
+    assert.ok(!out.readCovered, "read result untouched");
+});
+
+test("kernel: preserveRecentTools subtracts from an explicit never list too", () => {
+    // Explicit list keeps bash excluded; subtracting read protects only read.
+    const out = foldReadTurn(["decompress", "search_context", "read", "bash"], ["read"]);
+    assert.equal(out.blocksCreated, 0);
+    assert.ok(!out.readCovered, "read protected: removed from the explicit list");
+});
+
+test("kernel: preserveRecentTools with a non-matching pattern is a no-op", () => {
+    const out = foldReadTurn(undefined, ["grep"]);
+    assert.equal(out.errors.length, 0, `no errors: ${out.errors.join("; ")}`);
+    assert.ok(out.readCovered, "read still folds — built-in list untouched by a no-match pattern");
 });
