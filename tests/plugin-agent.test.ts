@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import http from "node:http";
+import net from "node:net";
 import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
@@ -62,7 +63,7 @@ type FakeProxy = {
     close(): Promise<void>;
 };
 
-async function startFakeProxy(opts: { failRegister?: number } = {}): Promise<FakeProxy> {
+async function startFakeProxy(opts: { failRegister?: number; statusOk?: boolean } = {}): Promise<FakeProxy> {
     const toolCalls: FakeProxy["toolCalls"] = [];
     const registers: FakeProxy["registers"] = [];
     const runtimeInfos: FakeProxy["runtimeInfos"] = [];
@@ -118,8 +119,13 @@ async function startFakeProxy(opts: { failRegister?: number } = {}): Promise<Fak
             return;
         }
         if (url.startsWith("/__bili/plugin/status")) {
-            res.writeHead(200, { "content-type": "application/json" });
-            res.end(JSON.stringify({ ok: true, contextTokens: 1234 }));
+            if (opts.statusOk === false) {
+                res.writeHead(404, { "content-type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "unknown plugin conversation" }));
+            } else {
+                res.writeHead(200, { "content-type": "application/json" });
+                res.end(JSON.stringify({ ok: true, contextTokens: 1234 }));
+            }
             return;
         }
         res.writeHead(404);
@@ -272,7 +278,7 @@ test("#535: non-http(s) manifest entries are dropped", () => {
     }
 });
 
-test("#535/#851: session_before_compact cancels only auto compaction under bili launch", () => {
+test("#535/#851: session_before_compact cancels only auto compaction under bili launch", async () => {
     const prevProxy = process.env.BILLION_CONTEXT_PROXY;
     process.env.BILLION_CONTEXT_PROXY = "http://127.0.0.1:8787";
     try {
@@ -280,10 +286,10 @@ test("#535/#851: session_before_compact cancels only auto compaction under bili 
         createBiliPlugin("pi")(pi as never);
         const handler = pi.events.get("session_before_compact");
         assert.ok(handler, "pi under bili launch: handler registered");
-        assert.deepEqual(handler({ reason: "threshold" }, undefined), { cancel: true });
-        assert.deepEqual(handler({ reason: "overflow" }, undefined), { cancel: true });
-        assert.equal(handler({ reason: "manual" }, undefined), undefined, "manual /compact stays user-owned");
-        assert.equal(handler({ reason: "startup" }, undefined), undefined, "unknown reason → not cancelled");
+        assert.deepEqual(await handler({ reason: "threshold" }, undefined), { cancel: true });
+        assert.deepEqual(await handler({ reason: "overflow" }, undefined), { cancel: true });
+        assert.equal(await handler({ reason: "manual" }, undefined), undefined, "manual /compact stays user-owned");
+        assert.equal(await handler({ reason: "startup" }, undefined), undefined, "unknown reason → not cancelled");
 
         // omp: the hook event carries no reason field, so the plugin tracks
         // the auto_compaction_start announcement instead — only announced
@@ -292,24 +298,24 @@ test("#535/#851: session_before_compact cancels only auto compaction under bili 
         createBiliPlugin("omp")(omp as never);
         const ompHandler = omp.events.get("session_before_compact");
         assert.ok(ompHandler, "omp under bili launch: handler registered");
-        assert.equal(ompHandler({}, undefined), undefined, "unannounced (manual) compaction stays user-owned");
+        assert.equal(await ompHandler({}, undefined), undefined, "unannounced (manual) compaction stays user-owned");
         const ompStart = omp.events.get("auto_compaction_start");
         const ompEnd = omp.events.get("auto_compaction_end");
         assert.ok(ompStart, "omp tracks auto_compaction_start announcements");
         assert.ok(ompEnd, "omp tracks auto_compaction_end announcements");
         ompStart({}, undefined);
-        assert.deepEqual(ompHandler({}, undefined), { cancel: true }, "announced auto compaction is cancelled");
-        assert.equal(ompHandler({}, undefined), undefined, "the announcement is consumed by the cancel");
+        assert.deepEqual(await ompHandler({}, undefined), { cancel: true }, "announced auto compaction is cancelled");
+        assert.equal(await ompHandler({}, undefined), undefined, "the announcement is consumed by the cancel");
         ompStart({}, undefined);
         ompEnd({}, undefined);
-        assert.equal(ompHandler({}, undefined), undefined, "aborted auto pass (end before hook) leaves manual unblocked");
+        assert.equal(await ompHandler({}, undefined), undefined, "aborted auto pass (end before hook) leaves manual unblocked");
     } finally {
         if (prevProxy === undefined) delete process.env.BILLION_CONTEXT_PROXY;
         else process.env.BILLION_CONTEXT_PROXY = prevProxy;
     }
 });
 
-test("#535/#519: no proxy at factory time → cancel inert until a proxy appears", () => {
+test("#535/#519: no proxy at factory time → cancel inert until a proxy appears", async () => {
     const prevProxy = process.env.BILLION_CONTEXT_PROXY;
     delete process.env.BILLION_CONTEXT_PROXY;
     try {
@@ -317,19 +323,162 @@ test("#535/#519: no proxy at factory time → cancel inert until a proxy appears
         createBiliPlugin("pi")(pi as never);
         const handler = pi.events.get("session_before_compact");
         assert.ok(handler, "handler registered; arming decided at event time");
-        assert.equal(handler({ reason: "threshold" }, undefined), undefined, "no proxy → native compaction untouched");
+        assert.equal(await handler({ reason: "threshold" }, undefined), undefined, "no proxy → native compaction untouched");
         // native mode (#519): BILLION_CONTEXT_PROXY lands only AFTER the factory ran
         process.env.BILLION_CONTEXT_PROXY = "http://127.0.0.1:8787";
-        assert.deepEqual(handler({ reason: "threshold" }, undefined), { cancel: true });
-        assert.deepEqual(handler({ reason: "overflow" }, undefined), { cancel: true });
-        assert.equal(handler({ reason: "manual" }, undefined), undefined, "manual /compact stays user-owned");
+        assert.deepEqual(await handler({ reason: "threshold" }, undefined), { cancel: true });
+        assert.deepEqual(await handler({ reason: "overflow" }, undefined), { cancel: true });
+        assert.equal(await handler({ reason: "manual" }, undefined), undefined, "manual /compact stays user-owned");
         // /bili/ baseUrl routing (no env at all) arms the cancel too
         delete process.env.BILLION_CONTEXT_PROXY;
         const biliCtx = { model: { baseUrl: "http://127.0.0.1:8787/bili/https://api.example.com/v1" } };
-        assert.deepEqual(handler({ reason: "threshold" }, biliCtx), { cancel: true });
+        assert.deepEqual(await handler({ reason: "threshold" }, biliCtx), { cancel: true });
     } finally {
         if (prevProxy === undefined) delete process.env.BILLION_CONTEXT_PROXY;
         else process.env.BILLION_CONTEXT_PROXY = prevProxy;
+    }
+});
+
+test("#1382: compaction cancel requires evidence the proxy carries this conversation", async () => {
+    // Native mode sets BILLION_CONTEXT_PROXY for the whole process, but a
+    // provider like pi-claude-bridge runs its own child process against
+    // upstream directly (model.baseUrl = literal "claude-bridge") — the proxy
+    // never saw this conversation. Cancelling there killed ALL compaction:
+    // the bridge disables Claude Code's own auto-compact and takes over Pi's
+    // in its own session_before_compact handler, which never runs once an
+    // earlier handler returned cancel. The fix: positive evidence only.
+    const bridgeCtx = {
+        sessionManager: { getSessionId: () => "sess-bridge" },
+        model: { contextWindow: 1000000, baseUrl: "claude-bridge" },
+        cwd: "/tmp",
+    };
+    const httpCtx = (sid: string) => ({
+        sessionManager: { getSessionId: () => sid },
+        model: { contextWindow: 1000000, baseUrl: "https://api.example.com/v1" },
+        cwd: "/tmp",
+    });
+
+    const unknownProxy = await startFakeProxy({ statusOk: false });
+    const knownProxy = await startFakeProxy({ statusOk: true });
+    try {
+        // (A) The reported repro: non-http(s) provider AND the proxy has no
+        // such conversation → threshold/overflow must NOT be cancelled.
+        await withEnv({ BILLION_CONTEXT_PROXY: unknownProxy.origin }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.equal(await handler({ reason: "threshold" }, bridgeCtx), undefined, "non-http(s) provider + unknown conversation → native compaction proceeds");
+            assert.equal(await handler({ reason: "overflow" }, bridgeCtx), undefined, "same for overflow");
+            assert.equal(await handler({ reason: "manual" }, bridgeCtx), undefined, "manual /compact stays user-owned");
+        });
+
+        // (B) The veto alone: even if the proxy CONFIRMS the conversation id
+        // (stale state from an earlier proxied phase of the same session), a
+        // non-http(s) baseUrl means this turn's traffic cannot reach it.
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.equal(await handler({ reason: "threshold" }, bridgeCtx), undefined, "non-http(s) baseUrl vetoes even a confirming proxy");
+        });
+
+        // (C) Positive evidence via the proxy: http provider, fresh instance
+        // (no local stamp), proxy confirms it carries the conversation → cancel.
+        await withEnv({ BILLION_CONTEXT_PROXY: knownProxy.origin }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.deepEqual(await handler({ reason: "threshold" }, httpCtx("sess-carried")), { cancel: true }, "proxy confirms carriage → auto compaction cancelled");
+        });
+
+        // (D) http provider whose traffic bypasses the proxy (e.g. a custom
+        // provider added after launch, never routed through it): no local
+        // stamp, proxy has no such conversation → native compaction proceeds.
+        await withEnv({ BILLION_CONTEXT_PROXY: unknownProxy.origin }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const handler = pi.events.get("session_before_compact")!;
+            assert.equal(await handler({ reason: "threshold" }, httpCtx("sess-direct")), undefined, "proxy never saw this conversation → native compaction proceeds");
+        });
+    } finally {
+        await unknownProxy.close();
+        await knownProxy.close();
+    }
+
+    // (E) Local stamp fast path: x-bili-plugin-conversation stamped for this
+    // sid (tools registered + request routed through the proxy) is evidence
+    // on its own — no status round-trip needed, so it holds even when the
+    // proxy reports the conversation unknown.
+    const stampedProxy = await startFakeProxy({ statusOk: false });
+    try {
+        await withEnv({ BILLION_CONTEXT_PROXY: stampedProxy.origin }, async () => {
+            const pi = makeFakePi();
+            createBiliPlugin("pi")(pi as never);
+            const ctx = fakeCtx(stampedProxy, "sess-stamped");
+            await pi.events.get("session_start")!({}, ctx);
+            await waitForTools(pi, 2);
+            const headers: Record<string, string> = {};
+            await pi.events.get("before_provider_headers")!({ headers }, ctx);
+            assert.equal(headers["x-bili-plugin-conversation"], "sess-stamped");
+            const handler = pi.events.get("session_before_compact")!;
+            assert.deepEqual(await handler({ reason: "threshold" }, ctx), { cancel: true }, "locally stamped session is carried by construction");
+        });
+    } finally {
+        await stampedProxy.close();
+    }
+
+    // (F) Probe failure is safe-side: proxy unreachable (connection refused)
+    // and no local stamp → no evidence → defer to native compaction instead
+    // of cancelling into an overflow.
+    const probePort = await new Promise<number>((resolve) => {
+        const s = net.createServer();
+        s.listen(0, "127.0.0.1", () => {
+            const port = (s.address() as { port: number }).port;
+            s.close(() => resolve(port));
+        });
+    });
+    await withEnv({ BILLION_CONTEXT_PROXY: `http://127.0.0.1:${probePort}` }, async () => {
+        const pi = makeFakePi();
+        createBiliPlugin("pi")(pi as never);
+        const handler = pi.events.get("session_before_compact")!;
+        assert.equal(await handler({ reason: "threshold" }, httpCtx("sess-down")), undefined, "unreachable proxy → no ownership evidence → native compaction proceeds");
+    });
+
+    // (G) omp parity: announced auto passes get the same evidence gate.
+    const ompCtx = httpCtx("sess-omp");
+    const runOmpCase = async (statusOk: boolean, expectCancel: boolean, label: string): Promise<void> => {
+        const proxy = await startFakeProxy({ statusOk });
+        try {
+            await withEnv({ BILLION_CONTEXT_PROXY: proxy.origin }, async () => {
+                const omp = makeFakePi();
+                createBiliPlugin("omp")(omp as never);
+                const handler = omp.events.get("session_before_compact")!;
+                omp.events.get("auto_compaction_start")!({}, undefined);
+                const got = await handler({}, ompCtx);
+                assert.deepEqual(got, expectCancel ? { cancel: true } : undefined, label);
+            });
+        } finally {
+            await proxy.close();
+        }
+    };
+    await runOmpCase(true, true, "omp: proxy confirms carriage → announced auto compaction cancelled");
+    await runOmpCase(false, false, "omp: proxy never saw the conversation → announced auto compaction proceeds");
+
+    // (H) omp identity fast path: a successful identity register is local
+    // evidence — the cancel holds even though the proxy reports unknown.
+    const identityProxy = await startFakeProxy({ statusOk: false });
+    try {
+        await withEnv({ BILLION_CONTEXT_PROXY: identityProxy.origin }, async () => {
+            const omp = makeFakePi();
+            createBiliPlugin("omp")(omp as never);
+            const ctx = httpCtx("sess-omp-id");
+            const payload = await omp.events.get("before_provider_request")!({ payload: { messages: [{ role: "user", content: "hi" }] } }, ctx);
+            assert.equal((payload as { prompt_cache_key?: string })?.prompt_cache_key, "sess-omp-id", "identity registration completed with the request");
+            omp.events.get("auto_compaction_start")!({}, undefined);
+            assert.deepEqual(await omp.events.get("session_before_compact")!({}, ctx), { cancel: true }, "identity-registered session is carried by construction");
+        });
+    } finally {
+        await identityProxy.close();
     }
 });
 
