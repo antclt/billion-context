@@ -23,7 +23,7 @@ import {
     resolveClaudeCli,
     stripClaudeManagedBlock,
 } from "../src/plugin-install.ts";
-import { CLAUDE_NATIVE_DEFAULT_PORT, clearClaudeNativePort, resolveClaudeNativePort, saveClaudeNativePort } from "../src/config.ts";
+import { CLAUDE_NATIVE_DEFAULT_PORT, clearClaudeNativePort, resolveClaudeNativePort, resolveNativeAttachExternal, saveClaudeNativePort } from "../src/config.ts";
 import { chooseWatchdogParentPid, isClaudeHostArgv, isTransientShArgv, planClaudeNativeBootstrap, readPsProcInfo, readWinProcInfo, resolveClaudeHostPid } from "../src/claude-native-bootstrap.ts";
 
 // #1248: the live tests below spawn real proxies/processes and observe real
@@ -146,6 +146,56 @@ test("resolveClaudeNativePort: env > default; rejects junk", () => {
     assert.equal(resolveClaudeNativePort({ BILI_CLAUDE_NATIVE_PORT: "49999" }), 49999);
     assert.equal(resolveClaudeNativePort({ BILI_CLAUDE_NATIVE_PORT: "0" }), CLAUDE_NATIVE_DEFAULT_PORT);
     assert.equal(resolveClaudeNativePort({ BILI_CLAUDE_NATIVE_PORT: "not-a-number" }), CLAUDE_NATIVE_DEFAULT_PORT);
+});
+
+// #1335: the attach-gate escape hatch — env BILI_NATIVE_ATTACH_EXTERNAL wins
+// over the config file's native.attachExternal; the file value must be exactly
+// true (garbage leaves the gate closed); default false.
+test("resolveNativeAttachExternal: env parsing (1/true open, 0/false close, junk falls through)", () => {
+    const prev = process.env.XDG_CONFIG_HOME;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-attachext-"));
+    process.env.XDG_CONFIG_HOME = dir;
+    try {
+        assert.equal(resolveNativeAttachExternal({}), false, "no env, no file → gate closed");
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "" }), false, "blank env falls through to file");
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "1" }), true);
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "true" }), true);
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: " TRUE " }), true, "case-insensitive and trimmed");
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "0" }), false);
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "false" }), false);
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "yes" }), false, "junk env is not a truthy answer");
+    } finally {
+        if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("resolveNativeAttachExternal: file native.attachExternal requires exact true; env still wins", () => {
+    const prev = process.env.XDG_CONFIG_HOME;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-attachext-"));
+    const cfgDir = path.join(dir, "billion-context");
+    fs.mkdirSync(cfgDir, { recursive: true });
+    const cfgFile = path.join(cfgDir, "billion-context.json");
+    process.env.XDG_CONFIG_HOME = dir;
+    try {
+        fs.writeFileSync(cfgFile, JSON.stringify({ native: { attachExternal: true } }));
+        assert.equal(resolveNativeAttachExternal({}), true, "file opens the gate");
+        assert.equal(resolveNativeAttachExternal({ BILI_NATIVE_ATTACH_EXTERNAL: "0" }), false, "env 0 overrides a permissive file");
+
+        fs.writeFileSync(cfgFile, JSON.stringify({ native: { attachExternal: "true" } }));
+        assert.equal(resolveNativeAttachExternal({}), false, "string 'true' in the file is not a boolean true");
+
+        fs.writeFileSync(cfgFile, "{ not json");
+        assert.equal(resolveNativeAttachExternal({}), false, "malformed file degrades to gate-closed, never throws");
+
+        fs.rmSync(cfgFile);
+        assert.equal(resolveNativeAttachExternal({}), false, "absent file → default false");
+    } finally {
+        if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 // — hook planner ————————————————————————————————————————————
@@ -1104,7 +1154,7 @@ test("watcher route: shared proxies take watcher registrations, daemons refuse (
 // void with zero signal. Now the hook must WARN loudly on stderr while
 // staying non-destructive (the daemon keeps serving; its fate is the
 // operator's). Linux-only like the other hook e2es (fake claude walks /proc).
-test("hook e2e: attaching to a squatting daemon warns instead of staying silent (#1322)", { timeout: 180_000, skip: LIVE_E2E ? process.platform !== "linux" : liveSkip }, async () => {
+test("hook e2e: unarmed squatter on the pinned port is refused loudly, not silently attached (#1322/#1335)", { timeout: 180_000, skip: LIVE_E2E ? process.platform !== "linux" : liveSkip }, async () => {
     const distCli = path.resolve(import.meta.dirname, "..", "dist", "index.js");
     const distScript = path.resolve(import.meta.dirname, "..", "dist", "claude-native-bootstrap.js");
     ensureDistBuilt(distCli);
@@ -1162,9 +1212,16 @@ test("hook e2e: attaching to a squatting daemon warns instead of staying silent 
         while (!fs.existsSync(doneFile) && Date.now() - t0 < 60_000) await new Promise((r) => setTimeout(r, 250));
         assert.ok(fs.existsSync(doneFile), "hook completed");
         const stderr = fs.readFileSync(errFile, "utf8");
-        assert.match(stderr, /attaching to running proxy/, "hook attached to the squatting daemon");
-        assert.match(stderr, /WARNING:.*NO session-lifecycle watchdog/s, "#1322: refusal surfaced instead of silently voiding the contract");
-        assert.match(stderr, /\(#1322\)/, "warning cites the issue for operators");
+        // #1335 gate: the hook must REFUSE the lifecycle-less listener and say
+        // so — the old warn-but-attach behavior is what let #1322 happen.
+        assert.match(stderr, /refusing to attach/, "hook refused the squatting daemon");
+        assert.match(stderr, /NO session-lifecycle watchdog/s, "#1322: refusal surfaced instead of silently voiding the contract");
+        assert.match(stderr, /\(#1322\/#1335\)/, "warning cites the issues for operators");
+        assert.match(stderr, /native\.attachExternal=true/, "escape hatch surfaced");
+        // strictPort launch cannot self-host (the squatter owns the port), so
+        // bring-up fails fast with an actionable kill/attach-anyway hint.
+        assert.match(stderr, /bring-up failed.*lifecycle-less/s, "pinned-port fast-fail explains itself");
+        assert.match(stderr, /Kill that process \(kill \d+\)/, "actionable kill hint");
         // Non-destructive: killing the session must NOT take the daemon down.
         killPid(claudePid);
         claudePid = 0;
