@@ -337,6 +337,34 @@ test("fork of a CCR-less parent is unchanged: no store, no artifact (#1341)", ()
     assert.notEqual(child.contentStoreDirty, true, "no dirty flag, hence no envelope write");
 });
 
+test("adoption disabled leaves the fork without blocks or store (#1341)", () => {
+    const body: Body = {
+        model: "test-model",
+        messages: [
+            { role: "user", content: "setup question" },
+            ...toolPair("call_a", BIG_A),
+            { role: "user", content: "follow-up question" },
+            { role: "assistant", content: "answer A" },
+            { role: "user", content: "next task" },
+            ...toolPair("call_b", BIG_B),
+        ],
+    };
+    const armed = armParent(body, { startId: "m00001", endId: "m00005" }, true);
+    const child = getSession(sid("child"), META);
+    maybeAdoptForkBlocks({
+        session: child,
+        parentId: armed.parent.id,
+        protocol: "openai",
+        parsed: structuredClone(body),
+        upstreamOrigin: META.upstreamOrigin,
+        enabled: false,
+        log: () => {},
+    });
+    assert.equal(child.state.blocks.length, 0);
+    assert.equal(child.contentStore, undefined);
+    assert.ok(!child.contentStoreDirty);
+});
+
 function listFiles(root: string): string[] {
     const out: string[] = [];
     for (const e of readdirSync(root, { withFileTypes: true })) {
