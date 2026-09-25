@@ -363,15 +363,44 @@ const CONTEXT_LIMIT_TABLE: Array<{ match: RegExp; limit: number }> = [
     { match: /^llama-/i, limit: 200_000 },
 ];
 
-export function lookupContextLimit(model: string | undefined): number | undefined {
-    if (!model) return undefined;
-    // Relay/vLLM deployments serve models under "prefix/name" ids that miss
-    // every ^-anchored pattern ("meta-llama/Llama-4" vs /^llama-/i). Try the
-    // bare basename too; the full name keeps precedence (#736).
+// Relay/vLLM deployments serve models under "prefix/name" ids that miss
+// every ^-anchored pattern ("meta-llama/Llama-4" vs /^llama-/i). Try the bare
+// basename too; the full name keeps precedence (#736).
+function modelRoots(model: string): string[] {
     const roots = [model];
     const slash = model.lastIndexOf("/");
     if (slash > 0 && slash < model.length - 1) roots.push(model.slice(slash + 1));
-    for (const root of roots) {
+    return roots;
+}
+
+export function lookupContextLimit(model: string | undefined): number | undefined {
+    if (!model) return undefined;
+    for (const root of modelRoots(model)) {
+        for (const entry of CONTEXT_LIMIT_TABLE) {
+            if (entry.match.test(root)) return entry.limit;
+        }
+    }
+    return undefined;
+}
+
+// #1321: model families where ONE id serves multiple context tiers and the
+// larger tier requires explicit per-request negotiation — Anthropic's
+// context-Nm beta header or an [Nm]-suffixed model name. models.dev
+// advertises the MAX tier, but a plain plan serves the standard window until
+// that negotiation happens; budgeting against the advertised max pushes every
+// percentage threshold beyond the client's own wall (#1310 item 2 → #1321).
+// The proxy caps registry-derived windows at the built-in standard window for
+// these families when no tier evidence is present. Every other family keeps
+// fresher-source-wins (#344/#852): a stale-low table entry must never pin a
+// grown registry window.
+const TIER_GATED_FAMILIES: Array<{ match: RegExp }> = [
+    { match: /^claude-/i },
+];
+
+export function tierGatedStandardWindow(model: string | undefined): number | undefined {
+    if (!model) return undefined;
+    for (const root of modelRoots(model)) {
+        if (!TIER_GATED_FAMILIES.some((fam) => fam.match.test(root))) continue;
         for (const entry of CONTEXT_LIMIT_TABLE) {
             if (entry.match.test(root)) return entry.limit;
         }

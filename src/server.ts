@@ -111,7 +111,7 @@ import { decodeRequestBody, DecompressedTooLargeError } from "./content-encoding
 import { applyCompatRoles, applyCompatRolesJson, detectRoleRejection, detectSystemPlacementError, resolveCompatRoles, type CompatRoles } from "./compat-roles.js";
 import { applyOutputSteering, applyOutputSteeringJson } from "./output-steering.js";
 import { bodyDumpEnabled, getUnrecognizedPathStats, isModelDiscoveryPath, logDumpFailure, logUnrecognizedPath } from "./server/observability.js";
-import { BILI_HOP_HEADER, anthropicBetaContextWindow, LAUNCHER_MODEL_WINDOWS, LAUNCHER_MODEL_MAX_OUTPUTS, launcherContextWindow, launcherMaxOutput, parseLauncherModelWindows, windowSourceLogged } from "./server/context-window.js";
+import { BILI_HOP_HEADER, anthropicBetaContextWindow, capRegistryWindowByStandard, expandedContextSuffixWindow, LAUNCHER_MODEL_WINDOWS, LAUNCHER_MODEL_MAX_OUTPUTS, launcherContextWindow, launcherMaxOutput, parseLauncherModelWindows, windowSourceLogged } from "./server/context-window.js";
 import { buildForwardHeaders, connectionNamedHeaders, NO_IDENTITY_MESSAGE, RESPONSE_ONLY_STRIP_HEADERS, safeSessionId, UPSTREAM_HOP_HEADERS } from "./server/headers.js";
 import { isSideRequest, outputBudgetField, restoreOutputBudget, SIDE_REQUEST_MAX_TOKENS, sideRequestGuard } from "./server/side-request.js";
 import { clampOutgoingOutput, countSystemAndToolsTokens, emergencyNudge, estimateInputTokens, estimateWireOverhead } from "./server/budget.js";
@@ -1320,11 +1320,13 @@ async function handle(
         reqModelId = typeof model === "string" ? model : undefined;
         if (model) {
             const embeddedUrl = route?.rewrittenUrl;
-            // Native-window resolution order: (0) the client's `anthropic-beta`
-            // larger-context negotiation (context-1m-… → 1,000,000) — the most
-            // direct per-request evidence of the window the upstream will serve,
-            // so it outranks every static source (the model table / registry
-            // list the STANDARD window, e.g. 200K for claude); (1) a cooperative
+            // Native-window resolution order: (0) per-request TIER EVIDENCE
+            // that this request runs on an expanded tier — (a) the client's
+            // `anthropic-beta` larger-context negotiation (context-1m-… →
+            // 1,000,000) or (b) an [Nm]-suffixed model name (claude-opus-5-5[1m]
+            // → 1M) — the most direct evidence of the window the upstream will
+            // serve, so it outranks every static source (the model table /
+            // registry list the STANDARD window, e.g. 200K for claude); (1) a cooperative
             // plugin's report (the agent's own config — most authoritative, gated
             // on the x-bili-plugin marker so a plain client cannot rewrite the
             // nudge denominator by name); (1b) the launcher's per-model
@@ -1339,11 +1341,17 @@ async function handle(
             // auto-fetched registry (#344); (3) a WARM models.dev registry
             // cache (daily refresh — outranks the static table whenever
             // already resident; peek never fetches, cold start skips to (4)
-            // without blocking); (4) the built-in CONTEXT_LIMIT_TABLE
+            // without blocking) — for TIER-GATED families (claude-) a registry
+            // value above the built-in standard window is capped back to the
+            // standard when rank 0 saw no tier evidence (#1321: models.dev
+            // advertises the max tier, plain plans serve the standard one);
+            // (4) the built-in CONTEXT_LIMIT_TABLE
             // fallback. Operator tuning via compress.modelContextLimit still
             // outranks everything inside resolveRequestConfig.
             const host = (() => { try { return embeddedUrl ? new URL(embeddedUrl).host : undefined; } catch { return undefined; } })();
             const betaWindow = anthropicBetaContextWindow(req.headers);
+            const suffixWindow = expandedContextSuffixWindow(model);
+            const hasTierEvidence = betaWindow !== undefined || suffixWindow !== undefined;
             const pluginWindow = pluginHeadersMatchModel(req.headers, model) ? pluginReportedContextWindow(req.headers) : undefined;
             // Runtime-table fallback for the window (#955): only when this
             // request's plugin sent no window header AND the agent's latest
@@ -1354,8 +1362,9 @@ async function handle(
             const launcherWindow = launcherContextWindow(model);
             const configuredWindow = resolveConfiguredContextLimit(opts.routes, embeddedUrl, model);
             const operatorWindowTuned = resolveCompress(opts.routes, embeddedUrl, model, opts.compress).modelContextLimit !== undefined;
-            const peekWindow = peekRegistryContext(model, host);
+            const peekWindow = capRegistryWindowByStandard(model, peekRegistryContext(model, host), hasTierEvidence);
             let native = betaWindow
+                ?? suffixWindow
                 ?? pluginWindow
                 ?? runtimeWindow
                 ?? launcherWindow
@@ -1365,16 +1374,16 @@ async function handle(
             // Fallback = no authoritative source AND the operator did not
             // explicitly tune the window via compress.modelContextLimit (an
             // explicit tuning is owned by the operator — never floored). The
-            // beta window is authoritative (the client's own runtime
-            // negotiation), so it also clears the fallback flag.
-            nativeFromFallback = !betaWindow && !pluginWindow && !runtimeWindow && !launcherWindow && !peekWindow && !configuredWindow && !operatorWindowTuned;
+            // beta/suffix windows are authoritative (the client's own runtime
+            // negotiation), so they also clear the fallback flag.
+            nativeFromFallback = !betaWindow && !suffixWindow && !pluginWindow && !runtimeWindow && !launcherWindow && !peekWindow && !configuredWindow && !operatorWindowTuned;
             if (!native) {
-                native = await contextFromRegistry(model, host);
+                native = capRegistryWindowByStandard(model, await contextFromRegistry(model, host), hasTierEvidence);
                 if (native) nativeFromFallback = false;
             }
             reqConfig = resolveRequestConfig(config, opts.routes, embeddedUrl, model, native, opts.compress);
             {
-                const wsSource = betaWindow ? "anthropic-beta" : pluginWindow ? "plugin" : runtimeWindow ? "runtime-info" : launcherWindow ? "launcher" : configuredWindow ? "configured" : peekWindow ? "registry-peek" : native ? "table-or-registry" : "default";
+                const wsSource = betaWindow ? "anthropic-beta" : suffixWindow ? "model-suffix" : pluginWindow ? "plugin" : runtimeWindow ? "runtime-info" : launcherWindow ? "launcher" : configuredWindow ? "configured" : peekWindow ? "registry-peek" : native ? "table-or-registry" : "default";
                 wsSourceForLog = wsSource;
                 if (!windowSourceLogged.has(model)) {
                     windowSourceLogged.add(model);
@@ -5462,6 +5471,6 @@ function logMsg(opts: ProxyOptions, level: string, msg: string): void {
 }
 
 export { getUnrecognizedPathStats, logDumpFailure, logUnrecognizedPath } from "./server/observability.js";
-export { BILI_HOP_HEADER, parseLauncherModelWindows, anthropicBetaContextWindow } from "./server/context-window.js";
+export { BILI_HOP_HEADER, parseLauncherModelWindows, anthropicBetaContextWindow, capRegistryWindowByStandard, expandedContextSuffixWindow } from "./server/context-window.js";
 export { isSideRequest, outputBudgetField, restoreOutputBudget, sideRequestGuard, type OutputBudgetField } from "./server/side-request.js";
 export { countSystemAndToolsTokens, estimateInputTokens, estimateWireOverhead, clampOutputBudget, emergencyNudge } from "./server/budget.js";
