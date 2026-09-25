@@ -582,6 +582,18 @@ test("#1365 verifyAttachAndRecover: routed evidence pins the channel — waits t
     }
 });
 
+test("#1365 route: already-routed /bili/ URLs record pinned-channel evidence before the model-URL gate", async () => {
+    const origin = "http://127.0.0.1:9999";
+    const state: NativeInterceptState = { origin, ready: Promise.resolve(origin) };
+    const route = createNativeRoute(state, { probe: async () => true });
+    const s: V2State = {};
+    const routed = new Request(`${origin}/bili/${MODEL_URL}`);
+    const e: V2HttpRequestEvent = { request: routed };
+    await route(e, s);
+    assert.equal(e.request, routed, "already-routed requests stay untouched");
+    assert.equal(state.routedOrigin, origin, "routed traffic records the pinned channel even though isModelApiUrl skips it");
+});
+
 test("#1365 verifyAttachAndRecover: persistently dead pinned target — refuses to spawn, keeps the env", async () => {
     const port = await reserveLoopbackPort();
     const origin = `http://127.0.0.1:${port}`;
