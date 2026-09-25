@@ -21,8 +21,8 @@
 //   hermes   ~/.hermes/plugins/billion-context/{plugin.yaml,__init__.py,bili.json}
 //            (#958: Python plugin — hermes's CLI agent plugin API is Python-only;
 //            it self-spawns/attaches a proxy and routes traffic via HTTPS_PROXY +
-//            HERMES_CA_BUNDLE, the same wire path as `bili hermes`; enablement is
-//            delegated to `hermes plugins enable`)
+//            SSL_CERT_FILE (combined CA bundle), the same wire path as `bili hermes`;
+//            enablement is delegated to `hermes plugins enable`)
 //   zcode    ~/.zcode/cli/config.json  hooks.enabled + SessionStart hook +
 //            mcp.servers.bili (stdio MCP); provider-store routing happens
 //            per-session, see src/zcode/ (no URL frozen at install time)

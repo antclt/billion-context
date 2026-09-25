@@ -3309,14 +3309,20 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
         // runs on its REAL home — including a user-set HERMES_HOME (discovery
         // resolved the same path, so the MITM whitelist matches). Its httpx
         // stack resolves ONE proxy env var (HTTPS_PROXY first) for both
-        // schemes and trusts custom CAs via HERMES_CA_BUNDLE: https upstreams
-        // ride CONNECT + cert MITM, plain-http upstreams ride absolute-form
-        // forward-proxy requests the server understands. Sessions bind by
-        // persisted content-prefix affinity when no identity carrier is
-        // present (anonymous requests are accepted, #286).
+        // schemes: https upstreams ride CONNECT + cert MITM, plain-http
+        // upstreams ride absolute-form forward-proxy requests the server
+        // understands. CA trust (#1375): current hermes resolves the main
+        // client via agent/ssl_verify.py — platform store + per-provider
+        // ssl_ca_cert, ambient trust only through SSL_CERT_FILE (OpenSSL
+        // replace semantics → the COMBINED bundle keeps blind-tunnelled hosts
+        // validating against public roots, #152). HERMES_CA_BUNDLE stays set
+        // for older builds and hermes' auth flows, which still read it.
+        // Sessions bind by persisted content-prefix affinity when no identity
+        // carrier is present (anonymous requests are accepted, #286).
         env = stripInheritedProxy(process.env);
         env.HTTPS_PROXY = origin;
         env.HERMES_CA_BUNDLE = ca;
+        env.SSL_CERT_FILE = resolveCombinedCaPath(process.env);
         if (routes.httpRewrites.length === 0 && routes.httpsDomains.length === 0) {
             console.error(
                 "bili: no hermes providers found in ~/.hermes/config.yaml — traffic will NOT go through the proxy (configure a provider first).",
