@@ -101,7 +101,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats } from "./mitm.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
@@ -1752,11 +1752,13 @@ async function handle(
         // CLAUDE_CODE_SESSION_ID the MCP shell registered, so binding is
         // race-free. Fall back to the headless pending queue (codex spawn)
         // for the first request that creates a new session.
+        let derivedParent: string | undefined;
         if (!pluginAgent && !anonAffinity) {
             const identityAgent = consumePluginRegisterFor(clientConv ?? conversation);
             if (identityAgent) {
-                pluginAgent = identityAgent;
+                pluginAgent = identityAgent.agent;
                 pluginConversation = clientConv ?? conversation;
+                derivedParent = identityAgent.parentConversationId;
             }
         }
         if (!pluginAgent && session.stats.requests === 0 && codexTurnIdentity(req.headers) === undefined && claudeSub === undefined) {
@@ -1769,6 +1771,7 @@ async function handle(
             if (pending) {
                 pluginAgent = pending.agent;
                 pluginConversation = pending.conversationId;
+                derivedParent = pending.parentConversationId;
             }
         }
         if (!pluginAgent && typeof session.metadata.pluginAgent === "string") pluginAgent = session.metadata.pluginAgent;
@@ -1807,6 +1810,28 @@ async function handle(
                 }
             } catch (err) {
                 log("warn", `[conflict] third-party plugin scan failed: ${String(err)} (#1206)`);
+            }
+        }
+        // [#1333] explicitly derived conversations (pi RLM child: the plugin
+        // reported its parent at register) record the parent link on the
+        // child's FIRST request. No state is copied — acp-kernel's syncBlocks
+        // deactivates blocks whose source messages are absent from the
+        // child's wire, so seeding blocks into an empty-history child never
+        // sticks. Instead decompress/search_context fall back to the linked
+        // parent chain at read time (src/decompress-shared.ts, depth cap 8).
+        if (derivedParent !== undefined && session.stats.requests === 0 && session.metadata.derivedFromSessionId === undefined) {
+            try {
+                const parentSession = resolveConversation(derivedParent)?.session;
+                if (parentSession) {
+                    session.metadata.derivedFrom = derivedParent;
+                    session.metadata.derivedFromSessionId = parentSession.id;
+                    markDirty(session);
+                    log("info", `[${session.id}] [derived] linked to parent session ${parentSession.id} (conversation ${derivedParent}) — decompress/search_context fall back to it read-only (#1333)`);
+                } else {
+                    log("warn", `[${session.id}] [derived] parent conversation ${derivedParent} is unknown to this proxy — no inheritance; continuing fresh (#1333)`);
+                }
+            } catch (err) {
+                log("warn", `[${session.id}] [derived] parent link from ${derivedParent} failed (${String(err)}); continuing fresh (#1333)`);
             }
         }
         // Responses, OpenAI-chat AND Anthropic-wire clients that send their
