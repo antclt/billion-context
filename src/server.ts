@@ -2293,25 +2293,46 @@ export function warnReasoningPairs(
     }
 }
 
-/** [#684] Anthropic-wire twin of the openai sentinel: with extended thinking
- *  + tool use, a preserved tool_use message whose thinking block was folded
- *  away is rejected by the API. */
+/** [#684] Anthropic-wire twin of the openai sentinel, narrowed by [#1327]:
+ *  warn only when bili itself lost thinking — a tool_use block that rode an
+ *  inbound assistant message WITH a thinking block now rides an outbound
+ *  assistant message with none. Outbound-only asymmetry (some tool_use turns
+ *  think, others don't) is ordinary Claude Code traffic: turns without
+ *  extended thinking never carry a block, and #651's dropCompressReasoning
+ *  creates the same shape by design — the old heuristic warned on every
+ *  healthy multi-turn session. Turns match by stable tool_use id (the kernel
+ *  codec round-trips it verbatim); benign asymmetry stays fully silent. */
 export function warnAnthropicThinkingPairs(
-    wireMessages: unknown[],
+    inboundMessages: unknown[],
+    outboundMessages: unknown[],
     log: (level: string, msg: string) => void,
     sessionId: string,
 ): void {
-    let withThinking = 0;
-    let split = 0;
-    for (const m of wireMessages) {
-        const msg = m as { role?: string; content?: Array<{ type?: string }> };
+    const thinkingIds = new Set<string>();
+    for (const m of inboundMessages) {
+        const msg = m as { role?: string; content?: Array<{ type?: string; id?: string }> };
         if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
-        const hasThinking = msg.content.some((b) => b?.type === "thinking");
-        if (hasThinking) withThinking++;
-        else if (msg.content.some((b) => b?.type === "tool_use")) split++;
+        if (!msg.content.some((b) => b?.type === "thinking")) continue;
+        for (const b of msg.content) {
+            if (b?.type === "tool_use" && typeof b.id === "string") thinkingIds.add(b.id);
+        }
     }
-    if (withThinking > 0 && split > 0) {
-        log("warn", `[${sessionId}] thinking-pair-violated: ${split} assistant tool_use message(s) lack a thinking block while ${withThinking} carry one — extended-thinking tool use requires preserved thinking (#684)`);
+    if (thinkingIds.size === 0) return;
+    let lost = 0;
+    const lostIds: string[] = [];
+    for (const m of outboundMessages) {
+        const msg = m as { role?: string; content?: Array<{ type?: string; id?: string }> };
+        if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+        if (msg.content.some((b) => b?.type === "thinking")) continue;
+        for (const b of msg.content) {
+            if (b?.type === "tool_use" && typeof b.id === "string" && thinkingIds.has(b.id)) {
+                lost++;
+                lostIds.push(b.id);
+            }
+        }
+    }
+    if (lost > 0) {
+        log("warn", `[${sessionId}] thinking-pair-violated: ${lost} tool_use block(s) lost their inbound thinking block in the outbound rebuild (${[...new Set(lostIds)].slice(0, 3).join(", ")}) — a stripped signature pair is rejected by the API (#684)`);
     }
 }
 
@@ -2668,7 +2689,7 @@ async function prepareAnthropic(
     markDirty(session);
 
     const rebuilt: AnthropicRequestBody = { ...parsed, messages: rebuiltMessages, system: systemOut, tools: toolsOut };
-    warnAnthropicThinkingPairs(rebuiltMessages, log, sessionId);
+    warnAnthropicThinkingPairs(parsed.messages, rebuiltMessages, log, sessionId);
     // prompt_cache_key is the omp plugin's session id stamped for the proxy's
     // identity chain (#268), not part of the Anthropic Messages API — strip it
     // so the real upstream never sees a field it doesn't know.
