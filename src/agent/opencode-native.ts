@@ -72,7 +72,7 @@ import { createAcpCommandHooks, showAcpText } from "./opencode-acp-command.js";
 import { markNativeHost, nativeAttachOrigin, nativeBootstrapGate, nativeProxyScriptPath, proxyEnvOrigin, singleFlight } from "./native-bootstrap.js";
 import { createLiveOriginResolver, installNativeFetchIntercept, isModelApiUrl, noteRoutedOrigin, observeRoutedOrigin, readyOrigin, replaceRequestTarget, routedBiliModelUrl, type LiveOriginResolverDeps, type NativeInterceptState } from "./native-intercept.js";
 import { createOpencodeV2Setup, type V2HttpRequestEvent, type V2State } from "./opencode-v2.js";
-import { fetchProxyVersion, reportRuntimeInfoOnChange, waitForProxyVersion } from "./shared.js";
+import { fetchProxyVersion, postIdentityRegister, reportRuntimeInfoOnChange, waitForProxyVersion } from "./shared.js";
 import { callLegacyAcpConfig, isLegacyAcpSession, loadLegacyAcp, type LegacyAcpModule } from "./opencode-legacy.js";
 
 /** Decides whether the native bootstrap should run in this process. */
@@ -476,6 +476,9 @@ export interface V1NativeDeps {
     legacy?: LegacyAcpModule;
     /** Legacy-session predicate (tests inject; runtime = state file exists). */
     isLegacy?: (sessionId: string | undefined) => boolean;
+    /** Derived-report retry cooldown after a failed register (tests inject a
+     *  short window; runtime default 10s, same order as pi's RETRY_INTERVAL). */
+    derivedRetryMs?: number;
     log?: (msg: string) => void;
 }
 
@@ -504,6 +507,40 @@ export function createV1ServerHooks(getOrigin: () => string | undefined, ctx: V1
     const log = deps.log ?? ((msg: string) => console.log(msg));
     let windows = new Map<string, number>();
     let outputs = new Map<string, number>();
+    // #1362: derived-session inheritance for the V1 lane (same register
+    // channel as pi/omp, #1333). opencode mints a fresh session id per
+    // persona/subagent (#1102); a child's SDK session info declares its
+    // parent (session.get → data.parentID). Report each derived session once
+    // so the proxy records a read-only parent link (decompress/search_context
+    // fall back to the parent chain — no state is copied). Fire-and-forget
+    // with a per-sid cooldown after failure: a missed report degrades to "no
+    // inheritance", never to a broken request; root sessions send nothing.
+    const derivedReported = new Map<string, "pending" | "done" | "none">();
+    const derivedRetryAt = new Map<string, number>();
+    const derivedRetryMs = deps.derivedRetryMs ?? 10000;
+    const maybeReportDerived = (base: string, sid: string): void => {
+        const get = ctx.client?.session?.get;
+        if (!sid || typeof get !== "function") return;
+        if (derivedReported.has(sid)) return;
+        const retryAt = derivedRetryAt.get(sid);
+        if (retryAt !== undefined && Date.now() < retryAt) return;
+        derivedReported.set(sid, "pending");
+        void (async () => {
+            try {
+                const res = await get({ path: { id: sid } });
+                const parent = res?.data?.parentID;
+                if (typeof parent === "string" && parent.length > 0 && parent !== sid) {
+                    await postIdentityRegister(base, sid, "opencode", parent);
+                    derivedReported.set(sid, "done");
+                } else {
+                    derivedReported.set(sid, "none");
+                }
+            } catch {
+                derivedReported.delete(sid);
+                derivedRetryAt.set(sid, Date.now() + derivedRetryMs);
+            }
+        })();
+    };
     const hooks: V1Hooks = {
         config: async (cfg) => {
             if (legacy?.configHook !== undefined) {
@@ -593,6 +630,7 @@ export function createV1ServerHooks(getOrigin: () => string | undefined, ctx: V1
                 output.headers["x-bili-plugin-model"] = model.id;
                 reportRuntimeInfoOnChange(base, { agent: "opencode", model: model.id, contextWindow: w, maxOutput: o, source: "client-config" });
             }
+            maybeReportDerived(base, input.sessionID);
         };
         const forward = deps.forward ?? ((o, conversationId, tool, args) => import("./shared.js").then((m) => m.forwardTool(o, conversationId, tool, args)));
         if (legacy !== undefined) {

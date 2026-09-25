@@ -118,6 +118,23 @@ export async function reportCompactionBoundary(proxyBase: string, conversationId
     }, COMPACT_TIMEOUT_MS);
 }
 
+/** Identity register (#162/#1333/#1362): tell the proxy which conversation
+ *  this host session is (identity: true), optionally declaring the
+ *  conversation it was derived from (parentConversationId). The proxy binds
+ *  any request carrying that id into plugin mode and records a read-only
+ *  parent link for derived sessions (decompress/search_context fall back to
+ *  the parent chain — no state is copied). Throws on non-ok so callers can
+ *  retry with their own throttle. */
+export async function postIdentityRegister(proxyBase: string, conversationId: string, agent: string, parentConversationId?: string): Promise<void> {
+    const res = await fetch(`${proxyBase}/__bili/plugin/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ conversationId, agent, identity: true, ...(parentConversationId ? { parentConversationId } : {}) }),
+        signal: AbortSignal.timeout(COMPACT_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`register HTTP ${res.status}`);
+}
+
 export type RuntimeInfoReport = {
     agent: string;
     model: string;

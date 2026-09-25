@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { wrapCacheReport, wrapRuleReport } from "../acp-panel.js";
 import { awaitNativeProxyOrigin } from "./native-bootstrap.js";
-import { detectProxyBase, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
+import { detectProxyBase, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, postIdentityRegister, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
 
 type Ctx = {
     sessionManager?: { getSessionId?: () => string; getHeader?: () => unknown } | undefined;
@@ -233,20 +233,6 @@ function noProxyWarning(agent: string): string {
 const RETRY_INTERVAL_MS = 10000;
 
 type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pending?: Promise<void>; retryAt?: number; identityAt?: string; carriedSids?: Set<string>; retryIntervalMs: number; manifestPrime?: { base: string; tools: Promise<ManifestTool[] | undefined> } };
-
-// omp never emits before_provider_headers, so the x-bili-plugin marker cannot
-// be stamped per request. Register the conversation id once (after tools are
-// ready): the proxy binds any request carrying that id into plugin mode —
-// same launcher path claude/codex use (#162).
-async function postIdentityRegister(proxyBase: string, conversationId: string, agent: string, parentConversationId?: string): Promise<void> {
-    const res = await fetch(`${proxyBase}/__bili/plugin/register`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ conversationId, agent, identity: true, ...(parentConversationId ? { parentConversationId } : {}) }),
-        signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) throw new Error(`register HTTP ${res.status}`);
-}
 
 async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, agent: string): Promise<void> {
     const proxyBase = proxyBaseForCtx(ctx);
