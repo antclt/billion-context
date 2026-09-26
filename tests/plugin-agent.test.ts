@@ -471,7 +471,9 @@ test("#1382: compaction cancel requires evidence the proxy carries this conversa
         await withEnv({ BILLION_CONTEXT_PROXY: identityProxy.origin }, async () => {
             const omp = makeFakePi();
             createBiliPlugin("omp")(omp as never);
-            const ctx = httpCtx("sess-omp-id");
+            // #1403: pck stamping (the identity signal) only fires for
+            // destinations bili actually processes — route through /bili/.
+            const ctx = { ...httpCtx("sess-omp-id"), model: { contextWindow: 1000000, baseUrl: `${identityProxy.origin}/bili/https://api.example.com/v1` } };
             const payload = await omp.events.get("before_provider_request")!({ payload: { messages: [{ role: "user", content: "hi" }] } }, ctx);
             assert.equal((payload as { prompt_cache_key?: string })?.prompt_cache_key, "sess-omp-id", "identity registration completed with the request");
             omp.events.get("auto_compaction_start")!({}, undefined);
@@ -1970,7 +1972,11 @@ test("#1362: omp child sessions report parentConversationId in the identity regi
 });
 
 // #266: omp's chat-completions payloads carry NO conversation signal, so the
-// plugin stamps prompt_cache_key with the omp session id. The
+// plugin stamps prompt_cache_key with the omp session id. #1403: pck is a
+// bili-internal identity signal, so it is ONLY stamped when the destination
+// will actually reach the proxy (/bili/-rewritten URL, BILLION_CONTEXT_PROXY
+// origin, or BILI_MITM_HOSTS whitelist) — a strict-schema upstream behind a
+// blind tunnel would reject the foreign field. The
 // before_provider_request return value REPLACES the whole outgoing payload
 // (omp onPayload chain), so the matrix below drives the real handler and
 // asserts exactly which payload shapes get stamped. fakeCtx(undefined) keeps
@@ -1983,9 +1989,15 @@ test("omp before_provider_request stamps prompt_cache_key only for chat-completi
         return pi;
     };
     // #1230: the handler is async (it awaits tool registration); fakeCtx
-    // (undefined) keeps registerTools a no-op, so awaiting stays pure.
+    // (undefined) keeps registerTools a no-op, so awaiting stays pure. The
+    // ctx carries a /bili/-rewritten baseUrl so the destination counts as
+    // proxy-routed (#1403).
+    const routedCtx = (): Record<string, unknown> => ({
+        ...fakeCtx(undefined, sid),
+        model: { contextWindow: 1000000, baseUrl: "http://127.0.0.1:8787/bili/https://api.example.com/v1" },
+    });
     const handler = async (pi: FakePi, payload: unknown) =>
-        pi.events.get("before_provider_request")!({ type: "before_provider_request", payload }, fakeCtx(undefined, sid));
+        pi.events.get("before_provider_request")!({ type: "before_provider_request", payload }, routedCtx());
 
     // chat payload (messages, no input, no max_tokens, no native pck) → stamped
     {
@@ -2016,10 +2028,10 @@ test("omp before_provider_request stamps prompt_cache_key only for chat-completi
         const out = await handler(pi, { input: [{ role: "user", content: "hi" }] });
         assert.equal(out, undefined, "responses payload (input) untouched");
     }
-    // anthropic wire shape (messages + max_tokens) → stamped too: the plugin
-    // cannot tell the wires apart by shape, and the proxy records the mapping
-    // from the body pck on the anthropic path and strips the field before
-    // forwarding to the real Anthropic (#268)
+    // anthropic wire shape (messages + max_tokens) → stamped too when the
+    // destination is proxy-visible: the plugin cannot tell the wires apart by
+    // shape, and the proxy records the mapping from the body pck on the
+    // anthropic path and strips the field before forwarding (#268/#1403)
     {
         const pi = mk();
         const out = await handler(pi, { messages: [{ role: "user", content: "hi" }], max_tokens: 1024, system: "s" }) as Record<string, unknown>;
@@ -2041,8 +2053,42 @@ test("omp before_provider_request stamps prompt_cache_key only for chat-completi
     // no messages array → untouched
     {
         const pi = mk();
-        assert.equal(await handler(pi, { model: "x" }), undefined, "no messages → untouched");
-        assert.equal(await handler(pi, { messages: "nope" }), undefined, "non-array messages → untouched");
+        const out = await pi.events.get("before_provider_request")!({ type: "before_provider_request", payload: { model: "m" } }, fakeCtx(undefined, sid));
+        assert.equal(out, undefined, "no messages array → untouched");
+    }
+
+    // #1403: destination gating — pck only reaches the proxy when the traffic
+    // actually flows through it; stamping for blind-tunnel destinations just
+    // leaks a foreign top-level field into strict-schema upstreams.
+    {
+        const pi = mk();
+        const out = await pi.events.get("before_provider_request")!({ type: "before_provider_request", payload: { messages: [{ role: "user", content: "hi" }] } }, fakeCtx(undefined, sid));
+        assert.equal(out, undefined, "external host not routed through the proxy → not stamped (#1403)");
+    }
+    {
+        const prev = process.env.BILI_MITM_HOSTS;
+        process.env.BILI_MITM_HOSTS = "api.example.com";
+        try {
+            const pi = mk();
+            const out = await pi.events.get("before_provider_request")!({ type: "before_provider_request", payload: { messages: [{ role: "user", content: "hi" }] } }, fakeCtx(undefined, sid)) as Record<string, unknown>;
+            assert.equal(out.prompt_cache_key, sid, "MITM-whitelisted external host → stamped (#1403)");
+        } finally {
+            if (prev === undefined) delete process.env.BILI_MITM_HOSTS;
+            else process.env.BILI_MITM_HOSTS = prev;
+        }
+    }
+    {
+        const prev = process.env.BILLION_CONTEXT_PROXY;
+        process.env.BILLION_CONTEXT_PROXY = "http://127.0.0.1:8787";
+        try {
+            const pi = mk();
+            const ctx = { ...fakeCtx(undefined, sid), model: { contextWindow: 1000000, baseUrl: "http://127.0.0.1:8787/v1/messages" } };
+            const out = await pi.events.get("before_provider_request")!({ type: "before_provider_request", payload: { messages: [{ role: "user", content: "hi" }] } }, ctx) as Record<string, unknown>;
+            assert.equal(out.prompt_cache_key, sid, "BILLION_CONTEXT_PROXY-matched origin → stamped (#1403)");
+        } finally {
+            if (prev === undefined) delete process.env.BILLION_CONTEXT_PROXY;
+            else process.env.BILLION_CONTEXT_PROXY = prev;
+        }
     }
 });
 

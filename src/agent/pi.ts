@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { wrapCacheReport, wrapRuleReport } from "../acp-panel.js";
 import { awaitNativeProxyOrigin } from "./native-bootstrap.js";
-import { detectProxyBase, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, postIdentityRegister, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
+import { detectProxyBase, destinationRoutedThroughProxy, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, postIdentityRegister, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
 
 type Ctx = {
     sessionManager?: { getSessionId?: () => string; getHeader?: () => unknown } | undefined;
@@ -135,8 +135,17 @@ export function parentConversationIdOf(ctx: Ctx): string | undefined {
 // from the body pck there as well and strips the field before forwarding to
 // the real Anthropic. pi is untouched (it stamps x-bili-plugin-conversation in
 // before_provider_headers, which outranks the body field).
+// #1403: stamp ONLY when the destination will actually be seen by the proxy —
+// the pck's sole consumer is the proxy itself (identity bind + strip-before-
+// forward). A destination the proxy blind-tunnels never sees the field, so the
+// stamp rides verbatim into the upstream body, where strict-schema upstreams
+// (opencode zen's anthropic endpoint: "prompt_cache_key: Extra inputs are not
+// permitted") 400 the whole request. Unrouted destinations degrade to the
+// proxy's anonymous prefix-affinity sessions (#309): compression still works,
+// /acp lookup by session id does not — acceptable vs a guaranteed 400.
 function stampPromptCacheKey(event: unknown, ctx: Ctx, agent: string): Record<string, unknown> | undefined {
     if (agent !== "omp") return undefined;
+    if (!destinationRoutedThroughProxy(ctx.model?.baseUrl)) return undefined;
     const payload = (event as { payload?: unknown } | undefined)?.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     const p = payload as Record<string, unknown>;
