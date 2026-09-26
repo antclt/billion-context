@@ -101,7 +101,7 @@ import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConver
 import { prefixAffinity, type AnonymousAffinity } from "./prefix-affinity.js";
 import { maybeAdoptForkBlocks } from "./fork-adoption.js";
 import { flushPrefixAffinity, hydratePrefixAffinity, scheduleAffinityPersist } from "./affinity-persist.js";
-import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, takePendingPluginRegister } from "./plugin.js";
+import { consumePluginRegisterFor, flushConversations, handlePluginCompact, handlePluginManifest, handlePluginRegister, handlePluginRuntimeInfo, handlePluginStatus, handlePluginTool, loadConversations, pipePluginChatWithStrip, pipePluginJson, pipePluginResponsesWithStrip, pluginAgentHeader, pluginConversationHeader, pluginHeadersMatchModel, pluginReportedContextWindow, pluginReportedMaxOutput, pluginRuntimeInfoFor, recordChainVerdict, recordPluginSession, rememberPluginMessages, resolveConversation, takePendingPluginRegister } from "./plugin.js";
 import { setupMitm, readMitmUpstream, getBlindTunnelStats } from "./mitm.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { BILI_PASSTHROUGH_HEADER, BILI_PLUGIN_BYPASS_HEADER, hardenOpenaiAssistantContent, isLoopbackAddress, inspectContextOverflow, reserveOutputHeadroom, resolveOutputHeadroomCap, shouldReserveOutputHeadroom, systemToUser, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "./util.js";
@@ -1752,11 +1752,13 @@ async function handle(
         // CLAUDE_CODE_SESSION_ID the MCP shell registered, so binding is
         // race-free. Fall back to the headless pending queue (codex spawn)
         // for the first request that creates a new session.
+        let derivedParent: string | undefined;
         if (!pluginAgent && !anonAffinity) {
             const identityAgent = consumePluginRegisterFor(clientConv ?? conversation);
             if (identityAgent) {
-                pluginAgent = identityAgent;
+                pluginAgent = identityAgent.agent;
                 pluginConversation = clientConv ?? conversation;
+                derivedParent = identityAgent.parentConversationId;
             }
         }
         if (!pluginAgent && session.stats.requests === 0 && codexTurnIdentity(req.headers) === undefined && claudeSub === undefined) {
@@ -1769,10 +1771,25 @@ async function handle(
             if (pending) {
                 pluginAgent = pending.agent;
                 pluginConversation = pending.conversationId;
+                derivedParent = pending.parentConversationId;
             }
         }
         if (!pluginAgent && typeof session.metadata.pluginAgent === "string") pluginAgent = session.metadata.pluginAgent;
         if (pluginAgent && !pluginConversation) pluginConversation = conversation;
+        // [#1333] Real pi plugin traffic arrives pre-stamped: `x-bili-plugin`
+        // + `x-bili-plugin-conversation` (set by the extension, pi.ts:127)
+        // set pluginAgent/pluginConversation from headers above, so the
+        // identity branch never runs for it. The identity register (which
+        // carries the derived child's parentConversationId) is keyed by that
+        // same conversation id and has already landed — the extension awaits
+        // the register POST inside registerTools before the first stamped
+        // request is sent (#1214) — so consult it here too. Link-only: on
+        // non-derived conversations parentConversationId is absent and this
+        // is a no-op.
+        if (derivedParent === undefined && pluginAgent !== undefined && pluginConversation !== undefined && !anonAffinity) {
+            const stamped = consumePluginRegisterFor(pluginConversation);
+            if (stamped?.parentConversationId !== undefined) derivedParent = stamped.parentConversationId;
+        }
         if (pluginAgent) {
             if (session.metadata.pluginAgent !== pluginAgent) session.metadata.pluginAgent = pluginAgent;
             // #970: for a split subagent session, record it under its split
@@ -1807,6 +1824,36 @@ async function handle(
                 }
             } catch (err) {
                 log("warn", `[conflict] third-party plugin scan failed: ${String(err)} (#1206)`);
+            }
+        }
+        // [#1333] explicitly derived conversations (pi RLM child: the plugin
+        // reported its parent at register) record the parent link on the
+        // child's FIRST request. No state is copied — acp-kernel's syncBlocks
+        // deactivates blocks whose source messages are absent from the
+        // child's wire, so seeding blocks into an empty-history child never
+        // sticks. Instead decompress/search_context fall back to the linked
+        // parent chain at read time (src/decompress-shared.ts, depth cap 8).
+        // Late binding is harmless (the link copies nothing at link time), so
+        // the gate is idempotence, not first-request: a request that raced the
+        // register POST can still pick the link up on a later turn.
+        if (derivedParent !== undefined && session.metadata.derivedFromSessionId === undefined) {
+            try {
+                const parentSession = resolveConversation(derivedParent)?.session;
+                if (parentSession) {
+                    session.metadata.derivedFrom = derivedParent;
+                    session.metadata.derivedFromSessionId = parentSession.id;
+                    markDirty(session);
+                    log("info", `[${session.id}] [derived] linked to parent session ${parentSession.id} (conversation ${derivedParent}) — decompress/search_context fall back to it read-only (#1333)`);
+                } else if (session.metadata.derivedLinkMissLogged !== true) {
+                    // The relaxed gate retries resolution on EVERY request until the link
+                    // lands — cap the miss signal at one line per session per proxy
+                    // process (in-memory flag: a restart re-warns once, which is useful).
+                    session.metadata.derivedLinkMissLogged = true;
+                    log("warn", `[${session.id}] [derived] parent conversation ${derivedParent} is unknown to this proxy — no inheritance; continuing fresh (#1333)`);
+                }
+            } catch (err) {
+                if (session.metadata.derivedLinkMissLogged !== true) session.metadata.derivedLinkMissLogged = true;
+                log("warn", `[${session.id}] [derived] parent link from ${derivedParent} failed (${String(err)}); continuing fresh (#1333)`);
             }
         }
         // Responses, OpenAI-chat AND Anthropic-wire clients that send their

@@ -5,12 +5,13 @@
 // minimal structural declarations — the bundled artifact imports NOTHING
 // from the host at runtime (the host duck-types us in).
 
+import fs from "node:fs";
 import { wrapCacheReport, wrapRuleReport } from "../acp-panel.js";
 import { awaitNativeProxyOrigin } from "./native-bootstrap.js";
 import { detectProxyBase, fetchManifest, forwardTool, fetchStatus, fetchProxyVersion, reportRuntimeInfoOnChange, armedIdleNotice, noSessionWarning, type ManifestTool } from "./shared.js";
 
 type Ctx = {
-    sessionManager?: { getSessionId?: () => string } | undefined;
+    sessionManager?: { getSessionId?: () => string; getHeader?: () => unknown } | undefined;
     model?: { contextWindow?: number; baseUrl?: string; provider?: string; id?: string; [key: string]: unknown } | undefined;
     cwd?: string;
 };
@@ -72,6 +73,41 @@ function sessionIdOf(ctx: Ctx): string | undefined {
     } catch {
         return undefined;
     }
+}
+
+/** [#1333] pi session files declare derivation in their header: the header of
+ *  an RLM inline-spawned child carries parentSession = the PATH of the parent
+ *  session file. The parent's conversation id is that file's own header id, so
+ *  resolving it takes one bounded read (64KB covers any header pi writes —
+ *  headers are the first JSONL line). Returns undefined for root sessions,
+ *  unreadable parents, or hosts without getHeader — derivation reporting is
+ *  strictly best-effort and never blocks registration. */
+export function parentConversationIdOf(ctx: Ctx): string | undefined {
+    try {
+        const header = ctx.sessionManager?.getHeader?.() as { parentSession?: unknown } | null | undefined;
+        const parentPath = typeof header?.parentSession === "string" ? header.parentSession.trim() : "";
+        if (!parentPath) return undefined;
+        const fd = fs.openSync(parentPath, "r");
+        try {
+            const buf = Buffer.alloc(64 * 1024);
+            const n = fs.readSync(fd, buf, 0, buf.length, 0);
+            for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
+                const text = line.trim();
+                if (!text) continue;
+                try {
+                    const obj = JSON.parse(text) as { type?: unknown; id?: unknown };
+                    if (obj?.type === "session" && typeof obj.id === "string" && obj.id) return obj.id;
+                } catch {
+                    // not JSON — keep scanning
+                }
+            }
+        } finally {
+            fs.closeSync(fd);
+        }
+    } catch {
+        // unreadable parent or missing getHeader — no derivation to report
+    }
+    return undefined;
 }
 
 // omp's chat-completions payloads carry NO conversation signal (no
@@ -193,11 +229,11 @@ type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pe
 // be stamped per request. Register the conversation id once (after tools are
 // ready): the proxy binds any request carrying that id into plugin mode —
 // same launcher path claude/codex use (#162).
-async function postIdentityRegister(proxyBase: string, conversationId: string, agent: string): Promise<void> {
+async function postIdentityRegister(proxyBase: string, conversationId: string, agent: string, parentConversationId?: string): Promise<void> {
     const res = await fetch(`${proxyBase}/__bili/plugin/register`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ conversationId, agent, identity: true }),
+        body: JSON.stringify({ conversationId, agent, identity: true, ...(parentConversationId ? { parentConversationId } : {}) }),
         signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) throw new Error(`register HTTP ${res.status}`);
@@ -242,9 +278,17 @@ async function registerTools(pi: ExtensionAPI, ctx: Ctx, state: RegisterState, a
             }
             state.toolsReady = true;
             state.retryAt = undefined;
-            if (agent === "omp" && sid !== "" && state.identityAt !== sid) {
+            // #1333: a pi child session (RLM inline spawn) reports its parent
+            // conversation so the proxy can record a read-only inheritance
+            // link (decompress/search_context fall back to the parent chain —
+            // no state is copied). Plain pi sessions never identity-register:
+            // their plugin-mode binding rides the x-bili-plugin-conversation
+            // header stamped per request below, so the extra register only
+            // fires when derivation is actually declared.
+            const parent = agent === "pi" ? parentConversationIdOf(ctx) : undefined;
+            if ((agent === "omp" || (agent === "pi" && parent !== undefined)) && sid !== "" && state.identityAt !== sid) {
                 try {
-                    await postIdentityRegister(proxyBase, sid, agent);
+                    await postIdentityRegister(proxyBase, sid, agent, parent);
                     state.identityAt = sid;
                 } catch (err) {
                     // Leave state.sid UNSET so the next per-request event

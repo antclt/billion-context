@@ -300,7 +300,7 @@ export function rememberPluginMessages(sessionId: string, processed: CoreMessage
 // (server.ts binding step): that session becomes plugin-mode (native tools,
 // wire injection suppressed) and the conversation id becomes its tool-API key
 // — no x-bili-plugin headers required.
-export type PendingPluginRegister = { conversationId: string; agent: string; ts: number };
+export type PendingPluginRegister = { conversationId: string; agent: string; ts: number; parentConversationId?: string };
 
 /** Runtime-info protocol entry (#955): what the client's OWN config says it
  *  will run — reported at plugin bootstrap and on model switch, before (and
@@ -387,7 +387,7 @@ const pendingRegisters: PendingPluginRegister[] = [];
  *  false` (headless codex spawn) means requests carry no matching id — bind
  *  the next NEW session instead. Splitting the two keeps a foreign session
  *  from eating an identity registration it can never claim. */
-export function queuePluginRegister(conversationId: string, agent: string, identity: boolean): void {
+export function queuePluginRegister(conversationId: string, agent: string, identity: boolean, parentConversationId?: string): void {
     if (!identity) {
         for (let i = 0; i < pendingRegisters.length; i++) {
             if (pendingRegisters[i]!.conversationId === conversationId) {
@@ -395,10 +395,10 @@ export function queuePluginRegister(conversationId: string, agent: string, ident
                 break;
             }
         }
-        pendingRegisters.push({ conversationId, agent, ts: Date.now() });
+        pendingRegisters.push({ conversationId, agent, ts: Date.now(), ...(parentConversationId ? { parentConversationId } : {}) });
         while (pendingRegisters.length > MAX_PENDING_REGISTERS) pendingRegisters.shift();
     } else {
-        registeredIds.set(conversationId, agent);
+        registeredIds.set(conversationId, { agent, ...(parentConversationId ? { parentConversationId } : {}) });
         while (registeredIds.size > MAX_PENDING_REGISTERS) {
             const oldest = registeredIds.keys().next().value;
             if (oldest !== undefined) registeredIds.delete(oldest);
@@ -424,16 +424,16 @@ export function takePendingPluginRegister(): PendingPluginRegister | undefined {
     }
     return pendingRegisters.shift();
 }
-const registeredIds = new Map<string, string>();
+const registeredIds = new Map<string, { agent: string; parentConversationId?: string }>();
 
 /** Identity-driven binding (#162): hosts whose model requests carry the SAME
  *  id the MCP shell registered (claude code: every request has
  *  x-claude-code-session-id === CLAUDE_CODE_SESSION_ID === the registered
  *  conversation id) bind the moment any of their requests shows up — no
  *  ordering race with the shell's initialize. */
-export function consumePluginRegisterFor(conversationId: string): string | undefined {
-    const agent = registeredIds.get(conversationId);
-    if (agent !== undefined) {
+export function consumePluginRegisterFor(conversationId: string): { agent: string; parentConversationId?: string } | undefined {
+    const entry = registeredIds.get(conversationId);
+    if (entry !== undefined) {
         // The registration describes the CONVERSATION, not a one-shot token:
         // switching models/upstreams mid-conversation resolves to a NEW
         // session (session key = protocol|upstream|apiKey|conversation) that
@@ -441,13 +441,13 @@ export function consumePluginRegisterFor(conversationId: string): string | undef
         // drop back to wire mode on every switch. Keep the entry and refresh
         // LRU order so the size cap evicts least-recently-active conversations.
         registeredIds.delete(conversationId);
-        registeredIds.set(conversationId, agent);
+        registeredIds.set(conversationId, entry);
     }
-    return agent;
+    return entry;
 }
 
 export function handlePluginRegister(payload: string, res: import("node:http").ServerResponse): void {
-    let parsed: { conversationId?: unknown; agent?: unknown; identity?: unknown };
+    let parsed: { conversationId?: unknown; agent?: unknown; identity?: unknown; parentConversationId?: unknown };
     try {
         parsed = JSON.parse(payload) as { conversationId?: unknown; agent?: unknown; identity?: unknown };
     } catch {
@@ -462,7 +462,11 @@ export function handlePluginRegister(payload: string, res: import("node:http").S
         return;
     }
     const agent = typeof parsed.agent === "string" && parsed.agent.trim() ? parsed.agent.trim() : "launcher";
-    queuePluginRegister(conversationId, agent, parsed.identity === true);
+    // [#1333] optional declared derivation (pi RLM child): the parent
+    // conversation the proxy should seed this conversation from.
+    let parentConversationId = typeof parsed.parentConversationId === "string" ? parsed.parentConversationId.trim() : "";
+    if (parentConversationId === conversationId) parentConversationId = "";
+    queuePluginRegister(conversationId, agent, parsed.identity === true, parentConversationId || undefined);
     res.end(JSON.stringify({ ok: true, conversationId, agent }));
 }
 
@@ -624,7 +628,7 @@ function conversationIdForSession(sessionId: string): string | undefined {
  *  back from the wire notes). Paths 2/3 record the resolved mapping so later
  *  calls hit path 1 directly. Read-only w.r.t. creation: an unknown id finds
  *  nothing and creates nothing. */
-function resolveConversation(conversationId: string): { session: Session | undefined; entry?: ConversationEntry } {
+export function resolveConversation(conversationId: string): { session: Session | undefined; entry?: ConversationEntry } {
     const entry = conversations.get(conversationId);
     let session = entry ? peekSession(entry.sessionId) : undefined;
     if (!session) {
