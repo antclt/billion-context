@@ -93,7 +93,10 @@ export function compressibleSpanHint(state: Pick<CompressionState, "messageRefs"
         const span = actives.length >= 2 ? ` (e.g. startId ${actives[0]}, endId ${actives[actives.length - 1]})` : "";
         return ` No raw refs are directly compressible right now — compress a run of ACTIVE blocks instead${span}: fold their summaries into one higher-tier block. acp_status lists the current active blocks.`;
     }
-    const covered = boundary > 0 ? ` (everything up to ${fmt(boundary)} is already inside active blocks)` : "";
+    // #1366: blocks need not be contiguous — a gap below the highest block end
+    // (e.g. m05027–m05052 between two blocks) is still compressible raw space, so
+    // claiming "everything up to N is inside blocks" misleads models into skipping it.
+    const covered = boundary > 0 ? ` (refs up to ${fmt(boundary)} are largely inside active blocks; isolated free gaps may still exist below it)` : "";
     return ` Live compressible refs: ${fmt(boundary + 1)}–${fmt(highest)}${covered}. Retry NOW in this same turn with startId/endId inside that span.`;
 }
 
