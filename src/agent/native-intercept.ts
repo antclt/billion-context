@@ -6,6 +6,7 @@
 // at extension load always wins. The patch is surgical — it rewrites ONLY
 // model-API shaped URLs and leaves every other request untouched.
 
+import { envMillis } from "./native-bootstrap.js";
 import { BILI_PASSTHROUGH_HEADER } from "../util.js";
 
 export interface NativeInterceptState {
@@ -59,6 +60,19 @@ export interface NativeInterceptState {
      *  (observed live: dsh fires R1 ~90ms before the manifest lands). Undefined
      *  (every lane that does not arm one) = no wait, behavior unchanged. */
     toolsReady?: Promise<unknown>;
+    /** #1365: origin baked into already-routed `/bili/` model URLs observed
+     *  by this process (sticky; last observation wins). Routed URLs are
+     *  STATICALLY pinned to that origin — a spawned replacement can never
+     *  carry them — so attach lanes treat this as evidence their model
+     *  channel cannot follow a new instance: wait for the pinned target /
+     *  fail loudly instead of spawning a second proxy (split brain). */
+    routedOrigin?: string;
+    /** #1365 owner hook: fired when routed model traffic is observed at an
+     *  origin different from the one previously noted (late evidence — e.g.
+     *  the first routed request landing after the attach decision already
+     *  settled elsewhere). The owner binds its tool surface to the observed
+     *  origin when healthy, or the session splits across two instances. */
+    onRoutedOriginObserved?: (origin: string) => void;
     /** Test/observability hook: every dispatched decision. */
     onDispatch?: (url: string, action: "rewrite" | "direct" | "self" | "retry") => void;
     /** #1290: observability hook — fired for every request the fetch patch lets
@@ -205,6 +219,55 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
 export async function readyOrigin(state: NativeInterceptState): Promise<string | undefined> {
     if (state.origin !== undefined) return state.origin;
     return withTimeout(state.ready, state.readyTimeoutMs ?? 15000);
+}
+
+// ———— Routed-channel evidence (#1365) ————————————————————————————
+// Already-routed `/bili/` model URLs carry their proxy origin baked into the
+// string; nothing bili does at runtime can move them to a different instance.
+// Observing one is therefore DIRECT EVIDENCE that this process's model channel
+// is pinned — the attach lanes consume it to decide wait/fail over spawn.
+
+/** Record the origin of an already-routed model URL on the shared state and
+ *  fire the owner hook on a transition (first observation or a NEW origin).
+ *  MUST be called before any gate/await in the dispatch path: the recording
+ *  must never be blocked by machinery it itself informs (the #1268 toolsReady
+ *  gate waits on tool registration, which waits on the attach decision, which
+ *  consumes this evidence — ordering it after the gate would self-deadlock
+ *  the first request). */
+export function noteRoutedOrigin(state: NativeInterceptState, url: string): void {
+    let origin: string;
+    try {
+        origin = new URL(url).origin;
+    } catch {
+        return;
+    }
+    if (state.routedOrigin === origin) return;
+    state.routedOrigin = origin;
+    state.onRoutedOriginObserved?.(origin);
+}
+
+const EVIDENCE_GRACE_DEFAULT_MS = 5000;
+const EVIDENCE_GRACE_POLL_MS = 100;
+
+/** Wait up to the evidence-grace window for the first routed model request to
+ *  reveal where this process's model channel is pinned. The startup attach
+ *  decision runs BEFORE the first request (the liveness probe fails in
+ *  milliseconds; the request lands seconds later), so an immediate spawn
+ *  fallback would race ahead of the evidence — the grace window lets the
+ *  channel shape declare itself. Returns the observed origin (pinned channel:
+ *  never spawn) or undefined (no routed traffic within the window — the
+ *  channel is presumed raw and may follow a replacement, legacy behavior).
+ *  BILI_ATTACH_EVIDENCE_GRACE_MS overrides the default; unset = unchanged. */
+export async function observeRoutedOrigin(state: NativeInterceptState): Promise<string | undefined> {
+    const limit = envMillis(process.env, "BILI_ATTACH_EVIDENCE_GRACE_MS", EVIDENCE_GRACE_DEFAULT_MS);
+    const startedAt = Date.now();
+    for (;;) {
+        const observed = state.routedOrigin;
+        if (observed !== undefined) return observed;
+        const elapsed = Date.now() - startedAt;
+        if (elapsed >= limit) return undefined;
+        await new Promise((r) => setTimeout(r, Math.min(EVIDENCE_GRACE_POLL_MS, limit - elapsed)));
+    }
 }
 
 // ———— Live-origin resolution (#1135) ——————————————————————————————
@@ -403,6 +466,9 @@ export function installNativeFetchIntercept(state: NativeInterceptState): boolea
                 state.onDispatch?.(url, "direct");
                 return orig(stamped.input, stamped.init);
             }
+            // #1365: attributed routed traffic pins this process's model channel
+            // to the baked origin — record it BEFORE the gate (noteRoutedOrigin).
+            noteRoutedOrigin(state, url);
             // The gate must clear BEFORE headersFor is consulted — the hook
             // reads the host's live tool-registration state, and evaluating
             // it pre-gate would freeze an un-stamped decision forever.

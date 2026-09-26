@@ -615,6 +615,8 @@
 | `BILI_UPSTREAM_PROXY` | 代理自身出站连接的上游代理 —— 优先级最高，高于 per-URL/per-provider 配置。见 README「上游代理」一节。 |
 | `BILI_INHERITED_HTTP_PROXY` / `BILI_INHERITED_HTTPS_PROXY` / `BILI_INHERITED_ALL_PROXY` / `BILI_INHERITED_NO_PROXY` | 非用户直接使用 —— launcher 起代理子进程时自动设置（#1012）。launcher 会从客户端和代理子进程两侧剥掉 shell 的代理变量（客户端必须把流量发给 bili；代理的模型出网也不能被 shell 代理劫持），但会把用户剥离前的代理转发到这些变量里，让代理的**辅助出网**（MITM 盲隧道 —— 客户端侧的 MCP/web 流量）仍能走用户的 VPN。它们只作用于盲隧道的 fallback 层：显式路由 / 全局 `proxy` / `BILI_UPSTREAM_PROXY` / 显式 `"upstreamProxyMode": "direct"` 仍然优先，指向 bili 自身端口的值会被丢弃。模型出网不受影响（未显式配置则保持直连）。 |
 | `BILI_UPSTREAM_TIMEOUT_MS` | 上游请求的空闲预算（毫秒）：首字节时间（TTFB）与响应体块之间的间隔（默认 `720000` = 12 分钟）。持续产出数据块的健康流永远不会被中途切断；静默的流才会。同一个值同时驱动底层 HTTP 客户端的传输层超时，因此这一个旋钮即可端到端约束本地大模型的超长 prefill（#551）。 |
+| `BILI_ATTACH_HEALTH_DEADLINE_MS` | dsh/opencode attach 校验中，attach 目标已挂但本进程模型通道**钉死**在其上（观察到指向它的 `/bili/…` 路由流量）时的健康等待上限（毫秒）：bili 等待目标恢复而不是 spawn 第二实例——spawn 会把会话劈成两半（模型流量保持钉死，bili 工具在另一实例上 404）。超时后大声报错，并在每次模型请求时持续重查直到目标恢复（默认 `15000`）。见 #1365。 |
+| `BILI_ATTACH_EVIDENCE_GRACE_MS` | dsh/opencode attach 校验探测到目标已挂时，等待路由通道证据出现的宽限窗口（毫秒），超时才回退到旧的 spawn 路径（覆盖「判定早于首个请求」的竞态：t≈0 时探测失败、t≈1s 时首个模型请求才落地）（默认 `5000`）。见 #1365。 |
 | `BILI_PERSIST` | 设 `0` 关闭会话持久化（仅内存，重启即丢）。 |
 | `BILI_PERSIST_DEBOUNCE_MS` | 持久化写盘的防抖窗口（毫秒，默认 `500`）。 |
 | `BILI_PERSIST_TAIL_TOKENS` | 持久化会话快照的 token 预算（#401）。盘上记录的是**折叠视图**（压缩范围以块摘要替代）并截断到该预算内的最新消息 —— 不再存全量原始历史。默认 `16384`；设 `0` 彻底不持久化消息（块摘要与压缩原件仍会持久化，`bili export` 退回块级渲染）。活会话内存不受影响 —— 活会话的 `bili export` 始终完整。 |
