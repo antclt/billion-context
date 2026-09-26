@@ -587,9 +587,24 @@ export function apply(ctx: PluginContext): void {
         return headers;
     };
 
-    void state.ready.then((origin) => {
-        if (origin !== undefined) void registerTools(ctx).catch(() => {});
+    // #1268: arm the interceptor's toolsReady gate — the first model request
+    // holds until this resolves, so it stamps into plugin mode instead of
+    // losing the boot race and silently riding wire mode. Resolves when the
+    // FIRST registration attempt finishes (success OR failure): on failure
+    // headersFor still returns undefined (wire mode, exactly as before) and a
+    // later maybeRetry success flips stamping on without re-arming the gate.
+    let resolveToolsGate!: () => void;
+    state.toolsReady = new Promise<void>((r) => {
+        resolveToolsGate = r;
     });
+    if (register.toolsReady) {
+        resolveToolsGate();
+    } else {
+        void state.ready.then(async (origin) => {
+            if (origin !== undefined) await registerTools(ctx).catch(() => {});
+            resolveToolsGate();
+        });
+    }
 
     // Runtime-info sources (#955): bind the model services when the host
     // exposes them (dynamic inject — a missing service must never keep the
@@ -645,6 +660,12 @@ export function _stateHeadersForTest(): ((url: string) => Record<string, string>
 
 export function _stateTakeoverGateForTest(): ((url: string) => boolean) | undefined {
     return state.takeoverGate;
+}
+
+/** Test hook (#1268): expose the armed toolsReady gate so a suite can prove
+ *  it resolves on the first registration attempt (success or failure). */
+export function _stateToolsReadyForTest(): Promise<unknown> | undefined {
+    return state.toolsReady;
 }
 
 /** Test hook: expose the armed runtime-recovery seam — the interceptor's

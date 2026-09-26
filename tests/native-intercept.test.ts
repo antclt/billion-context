@@ -31,6 +31,41 @@ function fakeFetch(sink: string[]) {
     }) as typeof fetch;
 }
 
+interface RecordedCall {
+    url: string;
+    headers: Record<string, string>;
+    at: number;
+}
+
+function fakeFetchRecordingHeaders(sink: RecordedCall[]) {
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+        const src = init?.headers !== undefined ? init.headers : input instanceof Request ? input.headers : undefined;
+        const headers: Record<string, string> = {};
+        if (src !== undefined) for (const [k, v] of new Headers(src).entries()) headers[k] = v;
+        sink.push({ url, headers, at: Date.now() });
+        return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+}
+
+async function withPatchRecording<T>(
+    state: NativeInterceptState,
+    fn: (fetch: typeof globalThis.fetch) => Promise<T>,
+): Promise<{ sink: RecordedCall[]; result: T }> {
+    const saved = globalThis.fetch;
+    _resetForTest();
+    const sink: RecordedCall[] = [];
+    globalThis.fetch = fakeFetchRecordingHeaders(sink);
+    try {
+        assert.equal(installNativeFetchIntercept(state), true);
+        const result = await fn(globalThis.fetch);
+        return { sink, result };
+    } finally {
+        globalThis.fetch = saved;
+        _resetForTest();
+    }
+}
+
 async function withPatch<T>(state: NativeInterceptState, fn: (fetch: typeof globalThis.fetch) => Promise<T>): Promise<{ sink: string[]; result: T }> {
     const saved = globalThis.fetch;
     _resetForTest();
@@ -69,6 +104,87 @@ test("install: waits for a not-yet-ready proxy before rewriting", async () => {
         assert.equal(res.status, 200);
     });
     assert.deepEqual(sink, ["http://127.0.0.1:40002/bili/http://127.0.0.1:8199/v1/messages"]);
+});
+
+test("install: holds the first model request until toolsReady, then stamps (#1268)", async () => {
+    let releaseTools: () => void = () => {};
+    const toolsReady = new Promise<void>((r) => {
+        releaseTools = r;
+    });
+    const state: NativeInterceptState = {
+        origin: "http://127.0.0.1:40003",
+        ready: Promise.resolve("http://127.0.0.1:40003"),
+        toolsReady,
+        headersFor: () => ({ "x-bili-plugin": "dsh", "x-bili-plugin-conversation": "session-1" }),
+    };
+    let releasedAt = 0;
+    const { sink } = await withPatchRecording(state, async (fetch) => {
+        const pending = fetch("http://127.0.0.1:8199/v1/messages");
+        await new Promise((r) => setTimeout(r, 30));
+        releaseTools();
+        releasedAt = Date.now();
+        const res = await pending;
+        assert.equal(res.status, 200);
+    });
+    assert.equal(sink.length, 1);
+    assert.ok(sink[0].at >= releasedAt - 5, "request held until toolsReady resolved (sent only after release)");
+    assert.equal(sink[0].url, "http://127.0.0.1:40003/bili/http://127.0.0.1:8199/v1/messages");
+    assert.equal(sink[0].headers["x-bili-plugin"], "dsh");
+    assert.equal(sink[0].headers["x-bili-plugin-conversation"], "session-1");
+});
+
+test("install: toolsReady timeout falls back to wire mode; later requests stamp (#1268)", async () => {
+    let readyFlag = false;
+    const toolsReady = new Promise<void>((r) => {
+        setTimeout(() => {
+            readyFlag = true;
+            r();
+        }, 150);
+    });
+    const state: NativeInterceptState = {
+        origin: "http://127.0.0.1:40004",
+        ready: Promise.resolve("http://127.0.0.1:40004"),
+        toolsReady,
+        readyTimeoutMs: 40,
+        headersFor: () => (readyFlag ? { "x-bili-plugin": "dsh" } : undefined),
+    };
+    const { sink } = await withPatchRecording(state, async (fetch) => {
+        const res = await fetch("http://127.0.0.1:8199/v1/messages");
+        assert.equal(res.status, 200);
+        await new Promise((r) => setTimeout(r, 160));
+        const res2 = await fetch("http://127.0.0.1:8199/v1/messages");
+        assert.equal(res2.status, 200);
+    });
+    assert.equal(sink.length, 2);
+    assert.equal(sink[0].headers["x-bili-plugin"], undefined, "gate timed out — first request un-stamped (wire mode)");
+    assert.equal(sink[1].headers["x-bili-plugin"], "dsh", "registration landed — later request stamped");
+});
+
+test("install: routed /bili/ model URLs also hold for toolsReady before stamping (#1268)", async () => {
+    let releaseTools: () => void = () => {};
+    const toolsReady = new Promise<void>((r) => {
+        releaseTools = r;
+    });
+    const state: NativeInterceptState = {
+        origin: "http://127.0.0.1:40005",
+        ready: Promise.resolve("http://127.0.0.1:40005"),
+        toolsReady,
+        headersFor: () => ({ "x-bili-plugin": "dsh", "x-bili-plugin-conversation": "session-9" }),
+    };
+    let releasedAt = 0;
+    const { sink } = await withPatchRecording(state, async (fetch) => {
+        const pending = fetch("http://127.0.0.1:40005/bili/http://127.0.0.1:8199/v1/messages");
+        await new Promise((r) => setTimeout(r, 30));
+        releaseTools();
+        releasedAt = Date.now();
+        const res = await pending;
+        assert.equal(res.status, 200);
+    });
+    assert.equal(sink.length, 1);
+    assert.ok(sink[0].at >= releasedAt - 5, "routed request held until toolsReady resolved (sent only after release)");
+    assert.equal(sink[0].url, "http://127.0.0.1:40005/bili/http://127.0.0.1:8199/v1/messages");
+    assert.equal(sink[0].headers["x-bili-plugin"], "dsh");
+    assert.equal(sink[0].headers["x-bili-plugin-conversation"], "session-9");
 });
 
 test("install: falls back to direct when the bootstrap fails/times out", async () => {
