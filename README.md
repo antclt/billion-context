@@ -4,9 +4,9 @@
 
 <div align="center">
 
-<strong>Context-compression plugin</strong>
+<strong>Context-compression plugin</strong> — <em>billion-context is all you need.</em>
 
-small context windows (100K is enough) · <em>5× fewer tokens</em> · month-long single sessions (billions of tokens) · high compression quality
+<sub>small context windows (100K is enough) · <em>5× fewer tokens</em> · month-long single sessions (billions of tokens) · high compression quality</sub>
 
 [![npm](https://img.shields.io/npm/v/billion-context.svg?style=flat-square)](https://www.npmjs.com/package/billion-context)
 [![license](https://img.shields.io/npm/l/billion-context.svg?style=flat-square)](https://github.com/ranxianglei/billion-context/blob/master/LICENSE)
@@ -35,8 +35,6 @@ small context windows (100K is enough) · <em>5× fewer tokens</em> · month-lon
 <a href="https://z.ai" title="zcode (Z.ai)"><img src="https://z-cdn.chatglm.cn/z-ai/static/logo.svg" height="26" alt="zcode"></a>&nbsp;
 <a href="https://omp.sh" title="omp (oh-my-pi, Stencil Labs)"><img src="https://omp.sh/favicon.svg" height="26" alt="omp"></a>&nbsp;
 <a href="https://github.com/1jehuang/jcode" title="jcode"><img src="https://github.com/1jehuang.png" height="26" alt="jcode"></a>
-
-<strong><em>billion-context is all you need.</em></strong>
 
 </div>
 
