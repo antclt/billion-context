@@ -57,6 +57,47 @@ export function detectProxyBase(baseUrl: string | undefined): string | undefined
     return proxyBaseFromUrl(baseUrl) ?? proxyBaseFromEnv();
 }
 
+// #1403: the launcher exports the proxy's MITM whitelist here so the extension
+// can tell which destinations the proxy will actually decrypt. Without it the
+// extension cannot distinguish "proxy will see this request" from "blind
+// tunnel — the field I inject reaches the upstream verbatim".
+export function mitmHostsFromEnv(env: NodeJS.ProcessEnv = process.env): Set<string> {
+    const out = new Set<string>();
+    for (const raw of env.BILI_MITM_HOSTS?.split(",") ?? []) {
+        const host = raw.trim().toLowerCase();
+        if (host.length > 0) out.add(host);
+    }
+    return out;
+}
+
+/** True iff requests to baseUrl will be SEEN by the bili proxy (and thus its
+ *  stamped prompt_cache_key consumed + stripped): a /bili/-wrapped URL, the
+ *  BILLION_CONTEXT_PROXY origin itself, or a host on the exported MITM
+ *  whitelist. Anything else rides a blind tunnel (or no proxy at all), where
+ *  the stamp is pure noise that strict-schema upstreams reject (#1403). */
+export function destinationRoutedThroughProxy(baseUrl: string | undefined): boolean {
+    if (!baseUrl) return false;
+    const viaBiliPath = proxyBaseFromUrl(baseUrl) !== undefined;
+    if (viaBiliPath) return true;
+    let origin: string | undefined;
+    let host: string;
+    try {
+        const url = new URL(baseUrl);
+        if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+        origin = `${url.protocol}//${url.host}`;
+        host = url.hostname.toLowerCase();
+    } catch {
+        return false;
+    }
+    if (origin === proxyBaseFromEnv()) return true;
+    const mitmHosts = mitmHostsFromEnv();
+    if (mitmHosts.size === 0) return false;
+    for (const d of mitmHosts) {
+        if (host === d || host.endsWith(`.${d}`)) return true;
+    }
+    return false;
+}
+
 async function fetchJson(url: string, init: RequestInit | undefined, timeoutMs: number, externalSignal?: AbortSignal): Promise<{ ok: boolean; status: number; json: unknown }> {
     const ac = new AbortController();
     // An already-aborted external signal never fires its "abort" event, so

@@ -879,6 +879,17 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
     };
 }
 
+/** The resolved mitm.domains tier exactly as loadOptions computes it (config
+ *  file ∪ BILI_MITM_DOMAINS, deduped). Exported so launchers can mirror the
+ *  precise whitelist their proxy child will use when deciding MITM vs blind
+ *  tunnel (#1403) — pass the env the CHILD will see, not process.env. */
+export function resolveMitmDomains(env: NodeJS.ProcessEnv): string[] {
+    return dedupeDomains([
+        ...(loadConfigFile().mitm?.domains ?? []),
+        ...splitCsv(env.BILI_MITM_DOMAINS),
+    ]);
+}
+
 /** Shape of the optional JSON config file. All fields optional — the file is a
  *  pure override layer; anything unset falls through to defaults. */
 type FileConfig = {

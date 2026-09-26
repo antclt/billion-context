@@ -1177,7 +1177,7 @@ async function handle(
     // forward as the #920 bypass.
     if (passthroughMark) {
         log("debug", `passthrough: ${req.method ?? "?"} ${maskUrlForLog(req.url ?? "")} — unattributed in-process caller (#1117), relaying verbatim`);
-        await forward(req, res, opts, bodyBuffer, null, core, config, log, route, instanceId, undefined);
+        await forward(req, res, opts, scrubAnthropicPck(protocol, bodyBuffer, log), null, core, config, log, route, instanceId, undefined);
         return;
     }
     // #300: bili→bili chain detection. If the inbound request already carries
@@ -1213,7 +1213,7 @@ async function handle(
     // here would double-manage it. Raw forward, zero state touched.
     if (headerValue(req, BILI_PLUGIN_BYPASS_HEADER) === "1") {
         log("debug", `bypass: ${req.method ?? "?"} ${maskUrlForLog(req.url ?? "")} — raw passthrough (legacy in-process compression)`);
-        await forward(req, res, opts, bodyBuffer, null, core, config, log, route, instanceId, undefined);
+        await forward(req, res, opts, scrubAnthropicPck(protocol, bodyBuffer, log), null, core, config, log, route, instanceId, undefined);
         return;
     }
     const countTokens = isCountTokensRequest(req.method ?? "GET", urlPath, bodyBuffer.length > 0);
@@ -1263,7 +1263,7 @@ async function handle(
                 }
                 log("warn", `[${protocol}] body has no "messages" array — not a model conversation; relaying verbatim to ${maskUrlsInText(upstreamOrigin)} instead of rejecting (#1284) — ${req.method ?? "?"} ${maskUrlForLog(req.url ?? "")}`);
             }
-            await forward(req, res, opts, bodyBuffer, null, core, config, log, route, instanceId, undefined);
+            await forward(req, res, opts, scrubAnthropicPck(protocol, bodyBuffer, log), null, core, config, log, route, instanceId, undefined);
             return;
         }
     }
@@ -1680,7 +1680,7 @@ async function handle(
                 if (firstVerdict) {
                     log("warn", `[chain] inbound ${protocol} request carries ACP compression artifacts (${artifactKind}) but neither ${BILI_HOP_HEADER} nor local compression state for session ${sessionId} — likely a bili→bili chain whose headers were stripped. Passing through without processing; if this is your own client, disable the content fallback with chainContentDetection=false (env BILI_CHAIN_CONTENT=0).`);
                 }
-                await forward(req, res, opts, bodyBuffer, null, core, config, log, route, instanceId, undefined);
+                await forward(req, res, opts, scrubAnthropicPck(protocol, bodyBuffer, log), null, core, config, log, route, instanceId, undefined);
                 return;
             }
             if (artifactKind !== null) {
@@ -1980,8 +1980,9 @@ async function handle(
                 return;
             }
             log("info", `[${session.id}] side request (max_tokens<=${SIDE_REQUEST_MAX_TOKENS}) → passthrough + tag strip only, kernel state untouched`);
+            const sideBody = scrubAnthropicPck(protocol, bodyBuffer, log);
             const sidePrepared: Prepared = {
-                body: bodyBuffer,
+                body: sideBody,
                 session,
                 processedMessages: [],
                 originalMessages: [],
@@ -1991,7 +1992,7 @@ async function handle(
                 sidePassthrough: true,
             };
             logRequestCost(log, session.id, inboundMsgs, inboundBytes, reqT0, bodyBuffer);
-            await forward(req, res, opts, bodyBuffer, sidePrepared, core, reqConfig, log, route, instanceId, affinity);
+            await forward(req, res, opts, sideBody, sidePrepared, core, reqConfig, log, route, instanceId, affinity);
             return;
         }
         // #987: the window is NEVER learned from traffic — no self-heal read
@@ -2335,7 +2336,7 @@ async function handle(
         if (protocol === null && !opts.passthrough && !routePassthrough && !isModelDiscoveryPath(urlPath)) {
             logUnrecognizedPath(log, req.url ?? "");
         }
-        await forward(req, res, opts, bodyBuffer, null, core, reqConfig, log, route, instanceId, undefined);
+        await forward(req, res, opts, scrubAnthropicPck(protocol, bodyBuffer, log), null, core, reqConfig, log, route, instanceId, undefined);
     }
 }
 
@@ -2612,6 +2613,32 @@ function effectiveTokenCount(session: Session, msgs: CoreMessage[], inboundImage
     // client-side shrink still shrinks the bound (fewer messages AND fewer
     // images), preserving the stale-high invariant.
     return Math.min(est, raw);
+}
+
+// #1403: top-level prompt_cache_key is NOT part of the Anthropic Messages API.
+// It is the omp plugin's session id stamped for the proxy's identity chain
+// (#268); the fully-processed path strips it (prepareAnthropic), but every
+// VERBATIM forward branch (side-request passthrough #388, chain verdict #1086,
+// bypass/passthrough marks, route/global passthrough #661, decode-fail
+// fallback) used to ship the raw buffer through — strict-schema upstreams
+// (opencode zen: "prompt_cache_key: Extra inputs are not permitted") 400'd
+// the request. Strip on those branches too. A body WITHOUT the field passes
+// back byte-identical, so #661's fingerprinting contract is untouched in the
+// normal case.
+function scrubAnthropicPck(protocol: WireProtocol | null, bodyBuffer: Buffer, log: (level: string, msg: string) => void): Buffer {
+    if (protocol !== "anthropic" || bodyBuffer.length === 0) return bodyBuffer;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(bodyBuffer.toString("utf8"));
+    } catch {
+        return bodyBuffer;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return bodyBuffer;
+    const p = parsed as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(p, "prompt_cache_key")) return bodyBuffer;
+    delete p.prompt_cache_key;
+    log("debug", `stripped prompt_cache_key from verbatim anthropic forward (#1403)`);
+    return Buffer.from(JSON.stringify(p), "utf8");
 }
 
 async function prepareAnthropic(
