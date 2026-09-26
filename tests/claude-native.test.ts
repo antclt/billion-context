@@ -24,7 +24,7 @@ import {
     stripClaudeManagedBlock,
 } from "../src/plugin-install.ts";
 import { CLAUDE_NATIVE_DEFAULT_PORT, clearClaudeNativePort, resolveClaudeNativePort, resolveNativeAttachExternal, saveClaudeNativePort } from "../src/config.ts";
-import { chooseWatchdogParentPid, isClaudeHostArgv, isTransientShArgv, planClaudeNativeBootstrap, readPsProcInfo, readWinProcInfo, resolveClaudeHostPid } from "../src/claude-native-bootstrap.ts";
+import { chooseWatchdogParentPid, isClaudeHostArgv, isTransientShArgv, planClaudeNativeBootstrap, readPsProcInfo, readWinProcInfo, resolveClaudeHostPid, splitWindowsCommandLine } from "../src/claude-native-bootstrap.ts";
 
 // #1248: the live tests below spawn real proxies/processes and observe real
 // /proc, ps output and network ports. On loaded shared machines (multi-agent
@@ -413,6 +413,45 @@ test("readWinProcInfo: parses '<ppid>\\t<commandline>', degrades to null", () =>
     assert.equal(readWinProcInfo(300, fakePs1("")), null);
     assert.equal(readWinProcInfo(300, fakePs1("Get-CimInstance : object not found\n")), null);
     assert.equal(readWinProcInfo(300, fakePs1(null)), null);
+});
+
+// #1388: Win32_Process quotes CommandLines whose paths contain spaces; a
+// naive whitespace split shreds the host path and the watchdog match fails.
+test("readWinProcInfo: quoted host path with spaces survives as one token (#1388)", () => {
+    const fakePs1 = (out: string | null) => (_cmd: string, _args: string[]): string | null => out;
+    // Reporter-verified shape: "C:\Program Files\...\opencode.exe" --flag hello world
+    assert.deepEqual(
+        readWinProcInfo(300, fakePs1('300\t"C:\\Program Files\\Apps\\opencode\\opencode.exe" --flag hello world\r\n')),
+        { argv: ["C:\\Program Files\\Apps\\opencode\\opencode.exe", "--flag", "hello", "world"], ppid: 300 },
+    );
+    // Quotes around a space-free path (what #1381's stripQuotes handled at the
+    // matching side) must parse identically.
+    assert.deepEqual(
+        readWinProcInfo(300, fakePs1('300\t"C:\\n.exe" C:\\x\\claude.exe\r\n')),
+        { argv: ["C:\\n.exe", "C:\\x\\claude.exe"], ppid: 300 },
+    );
+});
+
+// CommandLineToArgvW semantics: grouping quotes + the 2n/2n+1 backslash rule.
+test("splitWindowsCommandLine: quotes group, backslashes escape (#1388)", () => {
+    // Backslash rules: literal before a space/end-of-line; 2n-before-quote
+    // collapses to n and the quote toggles grouping; 2n+1-before-quote
+    // collapses to n plus a literal quote. String.raw keeps the counted
+    // characters visible.
+    assert.deepEqual(splitWindowsCommandLine(String.raw`a\\ b`), [String.raw`a\\`, "b"]);
+    assert.deepEqual(splitWindowsCommandLine(String.raw`a\" b`), ['a"', "b"]);
+    assert.deepEqual(splitWindowsCommandLine(String.raw`a\\\\`), [String.raw`a\\\\`]);
+    // Empty quoted segment is a real token ("" arg).
+    assert.deepEqual(splitWindowsCommandLine('"" x'), ["", "x"]);
+    // Tokens are unquoted; inner spaces survive inside quotes.
+    assert.deepEqual(splitWindowsCommandLine('"two words" x'), ["two words", "x"]);
+    // Conservation: re-joining with quotes around space-bearing tokens
+    // reproduces the original shell meaning (no token lost or invented).
+    const line = '"C:\\Program Files\\o\\o.exe" --flag "two words"';
+    const argv = splitWindowsCommandLine(line);
+    assert.equal(argv.length, 3);
+    assert.equal(argv[0], "C:\\Program Files\\o\\o.exe");
+    assert.equal(argv[2], "two words");
 });
 
 test("resolveClaudeHostPid: full walk over a ps-backed table", () => {
