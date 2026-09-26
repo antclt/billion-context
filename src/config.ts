@@ -1,4 +1,4 @@
-import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import { defaultConfig, DEFAULT_CCR_CONFIG, type Config, type Prompts } from "acp-kernel";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { configFile } from "./paths.js";
@@ -686,6 +686,63 @@ function warnAbsorbPluginDivergences(routes: ProviderRoutes, baseAbsorb?: Compre
     loggerLog("warn", `[acp-config] provider/model absorb override diverges from base [${divs.join("; ")}] — plugin-mode sessions follow the base value, proxy-mode sessions honor the override (#1359)`);
 }
 
+
+/** [#1345] A provider/model-level `ccr` field that diverges from what plugin
+ *  sessions actually execute. In plugin mode the static manifest is the ONLY
+ *  declaration of the retrieve surface, so the whole ccr block follows the base
+ *  config; such overrides only take effect on proxy-mode sessions. */
+export interface CcrOverrideDivergence {
+    /** Where the override lives, e.g. "provider https://api.x.com" or "provider https://api.x.com model gpt-4". */
+    level: string;
+    field: "enabled" | "toolName" | "minToolTokens" | "excludeTools" | "maxHeadChars";
+    value: unknown;
+    effective: unknown;
+}
+
+const CCR_FIELDS = ["enabled", "toolName", "minToolTokens", "excludeTools", "maxHeadChars"] as const;
+
+/** Pure: list every provider/model ccr field that would be ignored in plugin
+ *  sessions (base config governs there). Empty when base ccr is not enabled —
+ *  no plugin session can arm then, so nothing diverges (#1273 keeps
+ *  route-scoped-only enablement proxy-mode-only by design). */
+export function findCcrPluginDivergences(routes: ProviderRoutes, globalCompress?: CompressSettings): CcrOverrideDivergence[] {
+    const base = globalCompress?.ccr;
+    if (base?.enabled !== true) return [];
+    const out: CcrOverrideDivergence[] = [];
+    const report = (level: string, ccr?: CompressSettings["ccr"]): void => {
+        if (!ccr) return;
+        for (const f of CCR_FIELDS) {
+            if (!(f in ccr)) continue;
+            const value = ccr[f];
+            const effective = base[f] ?? DEFAULT_CCR_CONFIG[f];
+            const differs = Array.isArray(value) && Array.isArray(effective)
+                ? JSON.stringify(value) !== JSON.stringify(effective)
+                : value !== effective;
+            if (differs) out.push({ level, field: f, value, effective });
+        }
+    };
+    for (const [url, route] of Object.entries(routes)) {
+        report(`provider ${url}`, route.compress?.ccr);
+        for (const [model, entry] of Object.entries(route.models ?? {})) {
+            report(`provider ${url} model ${model}`, entry.compress?.ccr);
+        }
+    }
+    return out;
+}
+
+function formatCcrValue(v: unknown): string {
+    return typeof v === "string" ? `"${v}"` : JSON.stringify(v);
+}
+
+/** Log every #1345 divergence once per config load (called from loadOptions;
+ *  hot-reload funnels through it too — see handleConfigReload). */
+function warnCcrPluginDivergences(routes: ProviderRoutes, globalCompress?: CompressSettings): void {
+    for (const dv of findCcrPluginDivergences(routes, globalCompress)) {
+        loggerLog("warn", `[acp-config] ccr override ignored in plugin sessions: ${dv.level} ccr.${dv.field}=${formatCcrValue(dv.value)} — plugin sessions use ${formatCcrValue(dv.effective)} (base config governs the plugin manifest surface, #1345); proxy-mode sessions honor the override`);
+    }
+
+}
+
 export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions {
     // --- Source 1: JSON config file (~/.config/billion-context/billion-context.json) ---
     // The canonical, user-editable config. Loaded first so env vars below can
@@ -702,6 +759,7 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
     const upstream = (env.ACP_UPSTREAM ?? fileConfig.upstream ?? "https://api.anthropic.com").replace(/\/$/, "");
     const routes = loadRoutes(env);
     warnAbsorbPluginDivergences(routes, fileConfig.compress?.absorb);
+    warnCcrPluginDivergences(routes, fileConfig.compress);
     const passthrough = passthroughState(env);
     const modelContextLimit = parseInt(env.ACP_MODEL_CONTEXT_LIMIT ?? `${fileConfig.modelContextLimit ?? 200000}`, 10);
     const biliProxy = nonEmpty(env.BILI_UPSTREAM_PROXY);

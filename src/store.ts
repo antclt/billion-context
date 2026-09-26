@@ -3,8 +3,10 @@ import {
     buildStoredPlaceholder,
     contentStoreStats,
     createContentStore,
+    DEFAULT_CCR_CONFIG,
     noteRetrieval,
     RETRIEVE_TOOL_NAME,
+    type Config as KernelConfig,
     type CoreMessage,
     type MessageContentStore,
 } from "acp-kernel";
@@ -53,6 +55,19 @@ export function ccrEnabled(session: Session | undefined): boolean {
  *  override when set, else the kernel default. */
 export function retrieveToolName(session: Session | undefined): string {
     return effectiveCcr(session)?.toolName ?? RETRIEVE_TOOL_NAME;
+}
+
+/** [#1345] The loop config's ccr block must be exactly what the session stamp
+ *  says — the stamp is the single CCR policy source for the whole pipeline:
+ *  disarmed → stripped; armed → resolved (defaults filled) from the stamped
+ *  block, NOT from the request-resolved config. In plugin mode the two can
+ *  differ by design: the static manifest governs, so the entire plugin-mode
+ *  ccr block follows the base config (see the stamp site in server.ts). */
+export function ccrLoopConfig(session: Session | undefined, config: KernelConfig): KernelConfig {
+    if (!ccrEnabled(session)) return { ...config, ccr: undefined };
+    const eff = effectiveCcr(session);
+    if (!eff) return config;
+    return { ...config, ccr: { ...DEFAULT_CCR_CONFIG, ...eff } };
 }
 
 // [#1271] Wire protocols that support plugin-mode CCR. The agent advertises
