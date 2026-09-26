@@ -351,6 +351,7 @@ export function googleModelFromPath(urlPath: string): string | undefined {
     }
 }
 
+
 export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // Configure the tee logger (file + stderr) BEFORE any logging so the very
     // first line (persist status) lands in the file too.
@@ -1831,16 +1832,18 @@ async function handle(
                 log("warn", `[conflict] third-party plugin scan failed: ${String(err)} (#1206)`);
             }
         }
-        // [#1333] explicitly derived conversations (pi RLM child: the plugin
-        // reported its parent at register) record the parent link on the
-        // child's FIRST request. No state is copied — acp-kernel's syncBlocks
-        // deactivates blocks whose source messages are absent from the
-        // child's wire, so seeding blocks into an empty-history child never
+        // [#1333] explicitly derived conversations (pi RLM child, omp fork,
+        // opencode subagent: the plugin reported its parent at register)
+        // record the parent link once — normally on the child's first request,
+        // but the register POST can land AFTER it (the extension flips
+        // tools-ready before the register completes), so late requests of the
+        // same session may record it (#1362). No state is copied — acp-kernel's
+        // syncBlocks deactivates blocks whose source messages are absent from
+        // the child's wire, so seeding blocks into an empty-history child never
         // sticks. Instead decompress/search_context fall back to the linked
         // parent chain at read time (src/decompress-shared.ts, depth cap 8).
         // Late binding is harmless (the link copies nothing at link time), so
-        // the gate is idempotence, not first-request: a request that raced the
-        // register POST can still pick the link up on a later turn.
+        // the gate is idempotence, not first-request.
         if (derivedParent !== undefined && session.metadata.derivedFromSessionId === undefined) {
             try {
                 const parentSession = resolveConversation(derivedParent)?.session;
