@@ -104,6 +104,25 @@ export function adoptContentStore(session: Session, store: MessageContentStore):
     session.contentStoreDirty = true;
 }
 
+/** Ref-filtered independent clone of a content store (#1341): copies exactly
+ *  the byRef entries named in `refs` plus their byHash payloads (content-
+ *  addressed, so two refs sharing a hash copy one payload). Entry objects are
+ *  shallow-copied — the result shares no mutable state with the source.
+ *  Returns null when nothing matches: callers must not seed an empty store
+ *  (no artifact, no dirty flag). */
+export function cloneStoreForRefs(store: MessageContentStore, refs: Iterable<string>): MessageContentStore | null {
+    const wanted = new Set(refs);
+    const byRef: MessageContentStore["byRef"] = {};
+    const byHash: MessageContentStore["byHash"] = {};
+    for (const [ref, entry] of Object.entries(store.byRef)) {
+        if (!wanted.has(ref)) continue;
+        byRef[ref] = { ...entry };
+        const text = store.byHash[entry.hash];
+        if (text !== undefined && !(entry.hash in byHash)) byHash[entry.hash] = text;
+    }
+    return Object.keys(byRef).length > 0 ? { version: 1, byHash, byRef } : null;
+}
+
 /** Execute a retrieve-tool call against the kernel store: resolve the ref,
  *  count hit/miss, and queue the full-text injection for the re-request path
  *  (request-only, same channel as nudges — never persisted, structurally
