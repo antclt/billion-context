@@ -49,3 +49,14 @@ test("parseArgs: acp-cache diff --no-log (#1266)", () => {
     assert.equal(r.acpCacheDir, "/some/dir");
     assert.equal(r.acpCacheNoLog, true);
 });
+
+// #1235: `bili doctor` is a first-class command; --json selects the
+// machine-readable report.
+test("parseArgs: doctor is a command and --json sets doctorJson (#1235)", () => {
+    const r = parseArgs(["doctor"]);
+    assert.equal(r.command, "doctor");
+    assert.equal(r.doctorJson, false);
+    const j = parseArgs(["--json", "doctor"]);
+    assert.equal(j.command, "doctor");
+    assert.equal(j.doctorJson, true);
+});
