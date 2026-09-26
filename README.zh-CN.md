@@ -54,11 +54,11 @@ QQ群:
 <a href="https://www.minimax.io" title="MiniMax Code (mcode)"><img src="https://cdn.simpleicons.org/minimax/E73562" height="26" alt="MiniMax Code"></a>&nbsp;
 <a href="https://www.deepseek.com" title="deepseek-harness (dsh)"><img src="https://cdn.simpleicons.org/deepseek/5786FE" height="26" alt="deepseek-harness"></a>&nbsp;
 <a href="https://ampcode.com" title="Amp"><img src="https://icons.duckduckgo.com/ip3/ampcode.com.ico" height="26" alt="Amp"></a>&nbsp;
-<a href="https://aider.chat" title="aider"><img src="https://github.com/Aider-AI.png" height="26" alt="aider"></a>&nbsp;
-<a href="https://github.com/aaif-goose/goose" title="goose"><img src="https://github.com/aaif-goose.png" height="26" alt="goose"></a>&nbsp;
-<a href="https://github.com/NousResearch/hermes-agent" title="hermes"><img src="https://github.com/NousResearch.png" height="26" alt="hermes"></a>&nbsp;
-<a href="https://z.ai" title="zcode (Z.ai)"><img src="https://github.com/zai-org.png" height="26" alt="zcode"></a>&nbsp;
-<a href="https://www.npmjs.com/package/oh-my-pi" title="omp (oh-my-pi)"><img src="https://github.com/acidsugarx.png" height="26" alt="omp"></a>&nbsp;
+<a href="https://aider.chat" title="aider"><img src="https://raw.githubusercontent.com/Aider-AI/aider/main/aider/website/assets/icons/favicon-32x32.png" height="26" alt="aider"></a>&nbsp;
+<a href="https://github.com/aaif-goose/goose" title="goose"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/aaif-goose/goose/main/documentation/static/img/logo_dark.png"><img src="https://raw.githubusercontent.com/aaif-goose/goose/main/documentation/static/img/logo_light.png" height="26" alt="goose"></picture></a>&nbsp;
+<a href="https://github.com/NousResearch/hermes-agent" title="hermes"><img src="https://raw.githubusercontent.com/NousResearch/hermes-agent/main/apps/bootstrap-installer/src-tauri/icons/128x128.png" height="26" alt="hermes"></a>&nbsp;
+<a href="https://z.ai" title="zcode (Z.ai)"><img src="https://z-cdn.chatglm.cn/z-ai/static/logo.svg" height="26" alt="zcode"></a>&nbsp;
+<a href="https://omp.sh" title="omp (oh-my-pi, Stencil Labs)"><img src="https://omp.sh/favicon.svg" height="26" alt="omp"></a>&nbsp;
 <a href="https://github.com/1jehuang/jcode" title="jcode"><img src="https://github.com/1jehuang.png" height="26" alt="jcode"></a>
 </p>
 
