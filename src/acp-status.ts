@@ -10,7 +10,7 @@ import {
 import { conflictEventsOf, formatConflictSection } from "./conflict-watch.js";
 import { getBlindTunnelStats } from "./mitm.js";
 import { getUnrecognizedPathStats } from "./server/observability.js";
-import { ccrEnabled, contentStoreOf } from "./store.js";
+import { ccrEnabled, ccrLoopConfig, contentStoreOf } from "./store.js";
 import { coveredRefSpan } from "./decompress-shared.js";
 import { preCompactionArchiveOf, type Session } from "./session.js";
 import { VERSION } from "./version.js";
@@ -57,7 +57,7 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
         const turn = ctx.core.processTurn({
             messages: ctx.messages,
             state: ctx.session.state,
-            config: ccrEnabled(ctx.session) ? ctx.config : { ...ctx.config, ccr: undefined },
+            config: ccrLoopConfig(ctx.session, ctx.config),
             tokenCount: ctx.session.stats.lastInputTokens,
             renderTags: "none",
             contentStore: contentStoreOf(ctx.session),

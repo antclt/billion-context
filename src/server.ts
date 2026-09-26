@@ -62,7 +62,7 @@ import {
 } from "acp-kernel/wire";
 import { ABSORB_TOOL_NAME, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, absorbToolsFor, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
 import { applyAbsorbView, absorbEnabled, absorbToolName, storeEffectiveAbsorb } from "./absorb.js";
-import { adoptContentStore, ccrEnabled, ccrPluginWireOk, commitRetrievals, contentStoreOf, dropRetrievals, executeRetrieve, flushRetrievalNotes, pruneExpiredRetrievals, reconcileReloadedRetrievals, retrieveToolName, snapshotPendingRetrievals, storeEffectiveCcr, type CcrSettings } from "./store.js";
+import { adoptContentStore, ccrEnabled, ccrLoopConfig, ccrPluginWireOk, commitRetrievals, contentStoreOf, dropRetrievals, executeRetrieve, flushRetrievalNotes, pruneExpiredRetrievals, reconcileReloadedRetrievals, retrieveToolName, snapshotPendingRetrievals, storeEffectiveCcr, type CcrSettings } from "./store.js";
 import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
 import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
@@ -1913,16 +1913,22 @@ async function handle(
         // leave placeholders unretrievable.
         const storeChannelOk = protocol !== "responses" ||
             (!process.env.ACP_NO_INJECT_TOOL && !FORCE_TEXT_PROTOCOL && resolveCompressProtocol(opts.routes, upstreamOrigin) !== "marker");
-        // [review #1273] The plugin arm MUST gate on the BASE config because that
-        // is the only source the manifest reads (handlePluginManifest sees
-        // opts.compress.ccr, never the route/model-scoped merge). Route-scoped
-        // enablement without a base-level enabled flag would otherwise arm the
-        // store and emit placeholders while the manifest never advertised
-        // acp_retrieve — the model would see "→ acp_retrieve(...)" with no
-        // retrieval channel (silent loss). Route-scoped-only enablement stays
-        // proxy-mode-only (the proxy injects the tool itself, per-request).
-        const pluginCcrOk = !pluginMode || (ccrPluginWireOk(protocol) && opts.compress.ccr?.enabled === true);
-        storeEffectiveCcr(session, opts.compress.injectTool && pluginCcrOk && storeChannelOk && resolvedCcrCfg?.enabled === true ? resolvedCcrCfg : undefined);
+        // [#1345/#1273] Plugin mode: the static manifest (handlePluginManifest
+        // sees opts.compress.ccr, never the route/model-scoped merge) is the ONLY
+        // declaration of the retrieve surface, so the executed policy must be the
+        // base block verbatim — arm iff base enabled=true, whole block
+        // (toolName + thresholds) from base. Any provider/model ccr.* override
+        // splits declared from dispatched: toolName renames the session gate away
+        // from the registered name (calls 400 as unknown), enabled=false disarms
+        // a session whose manifest advertises (stored content unreachable,
+        // placeholders dangling). Provider/model ccr.* overrides are therefore
+        // proxy-lane-only (the proxy declares+dispatches per request under the
+        // merged block, per-route renames intact); findCcrPluginDivergences warns
+        // at config load about every divergent level/field.
+        const pluginCcrStamp = pluginMode
+            ? (ccrPluginWireOk(protocol) && opts.compress.ccr?.enabled === true ? opts.compress.ccr : undefined)
+            : (resolvedCcrCfg?.enabled === true ? resolvedCcrCfg : undefined);
+        storeEffectiveCcr(session, opts.compress.injectTool && storeChannelOk ? pluginCcrStamp : undefined);
         // [#1095] same channel/plugin-mode gating as CCR: image_full's restore
         // round-trip needs a tool channel on this wire; without one the model
         // could request originals it never gets back (silent-loss trap).
@@ -2720,7 +2726,7 @@ async function prepareAnthropic(
         // BEFORE absorb (ID-reference wins over distill); armed policy is
         // stamped per-request — strip `ccr` from the loop config when disarmed
         // (plugin mode / no tool channel) so placeholders never hit the wire.
-        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = ccrLoopConfig(session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -2916,7 +2922,7 @@ async function prepareOpenai(
         const absorbTools = absorbToolsFor(absorbBlock?.toolName ?? ABSORB_TOOL_NAME);
         const absorbActive = absorbBlock?.enabled === true && shouldInject;
         const rulesActive = rulesEnabled(config) && shouldInject;
-        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = ccrLoopConfig(session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -3144,7 +3150,7 @@ async function prepareGoogle(
         // ever injected into messages), so unlike absorb it needs no loop-
         // config stripping — only tool availability matters.
         const rulesActive = rulesEnabled(config) && shouldInject;
-        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = ccrLoopConfig(session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags: "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -3237,7 +3243,7 @@ export function prepareGoogleCountTokens(
         const { msgs } = googleToCore(parsed);
         // Read-only preview: the store rides in so placeholder substitution is
         // counted, but nothing is adopted (state is discarded here too).
-        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrEnabled(session) ? config : { ...config, ccr: undefined }, tokenCount: session.stats.lastInputTokens, renderTags: "text-only", contentStore: contentStoreOf(session) });
+        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrLoopConfig(session, config), tokenCount: session.stats.lastInputTokens, renderTags: "text-only", contentStore: contentStoreOf(session) });
         const stripped = stripKernelSummaries(turn.messages, turn.state);
         const rebuilt: GoogleRequestBody = { ...parsed, contents: coreToGoogle(stripped as BiliMessage[]) };
         log("info", `[${sessionId}] countTokens pruned: ${msgs.length} → ${stripped.length} msgs`);
@@ -3381,7 +3387,7 @@ async function prepareResponses(
         const absorbTools = absorbToolsFor(absorbBlock?.toolName ?? ABSORB_TOOL_NAME);
         const absorbActive = absorbBlock?.enabled === true && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
         const rulesActive = rulesEnabled(config) && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
-        const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const loopConfig = ccrLoopConfig(session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
         const turn = core.processTurn({ messages: msgs, state: session.state, config: loopConfig, tokenCount, renderTags, contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -3617,7 +3623,7 @@ export function prepareCountTokens(
     try {
         const { msgs, cacheControls } = anthropicToCore(parsed);
         // Read-only preview: same policy as the google twin above.
-        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrEnabled(session) ? config : { ...config, ccr: undefined }, tokenCount: session.stats.lastInputTokens, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
+        const turn = core.processTurn({ messages: msgs, state: session.state, config: ccrLoopConfig(session, config), tokenCount: session.stats.lastInputTokens, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         const stripped = stripKernelSummaries(turn.messages as BiliMessage[], turn.state);
         const rebuiltMessages = coreToAnthropic(stripped, cacheControls);
         log("info", `[${sessionId}] count_tokens pruned: ${msgs.length} → ${stripped.length} msgs`);
@@ -3698,7 +3704,7 @@ function prepareResponsesCompact(
         // The forged handoff is one-shot with no tool channel: strip absorb so
         // no [ACP absorb] instruction bakes into the forged history, and run
         // the absorb view so absorbed pairs stay hidden in it (wire parity).
-        const compactConfig = { ...config, absorb: undefined, ...(ccrEnabled(session) ? {} : { ccr: undefined }) };
+        const compactConfig = ccrLoopConfig(session, { ...config, absorb: undefined });
         const turn = core.processTurn({ messages: projection.msgs, state: session.state, config: compactConfig, tokenCount: session.stats.lastInputTokens, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only", contentStore: contentStoreOf(session) });
         session.state = turn.state;
         adoptContentStore(session, turn.contentStore);
@@ -5242,7 +5248,7 @@ async function forward(
             // the first request (prefix-cache anchor).
             const absorbBlock = effectiveAbsorbBlock(prepared.pluginMode === true, config, opts.compress.absorb);
             const absorbActive = absorbBlock?.enabled === true && opts.compress.injectTool && !textProtocol;
-            const loopConfig = { ...config, absorb: absorbActive ? absorbBlock : undefined, ...(ccrEnabled(prepared.session) ? {} : { ccr: undefined }) };
+            const loopConfig = ccrLoopConfig(prepared.session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
             const absorbSection = absorbActive
                 ? `\n\n---\n\n${buildAbsorbSystemPrompt(absorbToolName(loopConfig))}`
                 : "";
@@ -5488,9 +5494,10 @@ function handleConfigReload(opts: ProxyOptions, res: http.ServerResponse, log: (
     // (which read opts.routes) pick up the new entries without needing reassignment.
     for (const k of Object.keys(opts.routes)) delete opts.routes[k];
     Object.assign(opts.routes, fresh);
-    opts.compress = loadOptions().compress;
-    opts.compat = loadOptions().compat;
-    opts.imageBilling = loadOptions().imageBilling;
+    const reloaded = loadOptions();
+    opts.compress = reloaded.compress;
+    opts.compat = reloaded.compat;
+    opts.imageBilling = reloaded.imageBilling;
     // Release cached ProxyAgents so agents for proxy URLs that were
     // removed/changed don't leak for the process lifetime. The next request
     // re-creates the needed agent lazily via proxyDispatcher().

@@ -12,7 +12,7 @@ import { executeProxyTool } from "./loop/core.js";
 import { normalizeSseLineEndings } from "./sse-util.js";
 import { composeStreamFilters, containsMarkerLineText, containsRenderTagText, containsToolCallXmlFragment, createMarkerLineFilter, createTagEchoFilter, mayStartMarkerLine, mayStartRenderTag, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
 import { log as loggerLog } from "./logger.js";
-import { ccrEnabled, contentStoreOf, retrieveToolName } from "./store.js";
+import { ccrEnabled, ccrLoopConfig, contentStoreOf, retrieveToolName } from "./store.js";
 import { imageUsageSuffix } from "./image-compress.js";
 import { emitStreamError, emitUpstreamTruncation } from "./stream-error.js";
 import { degenerateTurnWarning } from "./degenerate-turn.js";
@@ -764,7 +764,7 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
             nudge = deps.core.processTurn({
                 messages,
                 state: session.state,
-                config: ccrEnabled(session) ? pluginCfg : { ...pluginCfg, ccr: undefined },
+                config: ccrLoopConfig(session, pluginCfg),
                 tokenCount: session.stats.lastInputTokens,
                 renderTags: "none",
                 contentStore: contentStoreOf(session),

@@ -10,7 +10,7 @@ import {
 import { buildCompressSystemPrompt, parseCompressInput } from "./compress-tool.js";
 import { IMAGE_PLACEHOLDER, imagePlaceholders } from "./image-note.js";
 import { applyAbsorbView } from "./absorb.js";
-import { adoptContentStore, ccrEnabled, contentStoreOf } from "./store.js";
+import { adoptContentStore, ccrLoopConfig, contentStoreOf } from "./store.js";
 import { applyRanges, normalizeRangeOrder, type RewriteCtx } from "./stream.js";
 import { fetchWithTimeout, isTransientUpstreamError, replayMaxAttempts, replayBackoffMs, sleep, UpstreamHttpError } from "./fetch-util.js";
 import { proxyDispatcher } from "./upstream-proxy.js";
@@ -856,7 +856,7 @@ export async function preflightCompress(deps: PreflightDeps, messages: CoreMessa
         const turn = deps.core.processTurn({
             messages,
             state: deps.session.state,
-            config: noEmergencyTruncate(ccrEnabled(deps.session) ? activeConfig : { ...activeConfig, ccr: undefined }),
+            config: noEmergencyTruncate(ccrLoopConfig(deps.session, activeConfig)),
             tokenCount: currentTokens,
             renderTags: "text-only",
             contentStore: contentStoreOf(deps.session),
