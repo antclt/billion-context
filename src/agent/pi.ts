@@ -187,7 +187,7 @@ function noProxyWarning(agent: string): string {
 
 const RETRY_INTERVAL_MS = 10000;
 
-type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pending?: Promise<void>; retryAt?: number; identityAt?: string; retryIntervalMs: number; manifestPrime?: { base: string; tools: Promise<ManifestTool[] | undefined> } };
+type RegisterState = { sid?: string; toolsFor?: string; toolsReady?: boolean; pending?: Promise<void>; retryAt?: number; identityAt?: string; carriedSids?: Set<string>; retryIntervalMs: number; manifestPrime?: { base: string; tools: Promise<ManifestTool[] | undefined> } };
 
 // omp never emits before_provider_headers, so the x-bili-plugin marker cannot
 // be stamped per request. Register the conversation id once (after tools are
@@ -328,13 +328,52 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
         // load-time check would leave the cancel disarmed for the whole
         // session. Plain pi/omp with the plugin installed but NO reachable
         // proxy (incl. a failed bootstrap) stays fully native.
+        // #1382: a proxy EXISTING is not enough — the evidence must be that
+        // THIS conversation's traffic reaches it. Native mode sets
+        // BILLION_CONTEXT_PROXY for the whole process, but extension-provided
+        // models like pi-claude-bridge run their own child processes (the
+        // model's baseUrl is literally "claude-bridge") and call upstream
+        // directly: the fetch intercept never sees those requests, so the
+        // proxy never carried the conversation. Cancelling there killed ALL
+        // compaction — the bridge disables Claude Code's own auto-compact and
+        // takes over Pi's in its own session_before_compact handler, which
+        // never runs once an earlier handler returned cancel. Accepted
+        // evidence, in order: (1) local — we stamped
+        // x-bili-plugin-conversation for this session id (tools registered
+        // AND a request routed through the proxy), or omp's identity register
+        // succeeded; (2) remote — the proxy confirms it carries the
+        // conversation id (/__bili/plugin/status ok). A non-http(s) baseUrl
+        // vetoes outright: such providers' traffic cannot reach the proxy by
+        // construction. Hosts exposing no stable session id keep the
+        // historical cancel (the proxy may carry them under a derived
+        // content-hash identity, where avoiding double compression still
+        // wins). Probe failure (proxy down/hung) means NO evidence → defer to
+        // native compaction: a surviving native pass is safe (#395), a wrong
+        // cancel overflows the session. The handlers are async on purpose —
+        // pi's runner awaits session_before_compact handlers (verified in
+        // pi-coding-agent dist) before consulting .cancel/.compaction.
+        const ownsCompaction = async (ctx: Ctx | undefined): Promise<boolean> => {
+            const proxyBase = proxyBaseForCtx(ctx);
+            if (proxyBase === undefined) return false;
+            const baseUrl = ctx?.model?.baseUrl;
+            if (typeof baseUrl === "string" && baseUrl.length > 0 && !/^https?:\/\//i.test(baseUrl)) return false;
+            const sid = ctx === undefined ? undefined : sessionIdOf(ctx);
+            if (sid === undefined || sid.length === 0) return true;
+            if (agent === "pi" ? state.carriedSids?.has(sid) === true : state.identityAt === sid) return true;
+            try {
+                return (await fetchStatus(proxyBase, sid)) !== undefined;
+            } catch (err) {
+                console.error(`bili-plugin(${agent}): compaction ownership probe failed (${err instanceof Error ? err.message : String(err)}) — leaving native compaction enabled`);
+                return false;
+            }
+        };
         if (agent === "pi" || agent === "omp") {
             if (agent === "pi") {
-                pi.on("session_before_compact", (event, ctx) => {
-                    if (proxyBaseForCtx(ctx) === undefined) return undefined;
+                pi.on("session_before_compact", async (event, ctx) => {
                     const reason = (event as unknown as { reason?: unknown }).reason;
-                    if (reason === "threshold" || reason === "overflow") return { cancel: true };
-                    return undefined;
+                    if (reason !== "threshold" && reason !== "overflow") return undefined;
+                    if (!(await ownsCompaction(ctx))) return undefined;
+                    return { cancel: true };
                 });
             } else {
                 let autoPending = false;
@@ -344,9 +383,9 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
                 pi.on("auto_compaction_end", () => {
                     autoPending = false;
                 });
-                pi.on("session_before_compact", (event, ctx) => {
-                    if (proxyBaseForCtx(ctx) === undefined) return undefined;
+                pi.on("session_before_compact", async (event, ctx) => {
                     if (!autoPending) return undefined;
+                    if (!(await ownsCompaction(ctx))) return undefined;
                     autoPending = false;
                     return { cancel: true };
                 });
@@ -574,6 +613,10 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
                 if (state.toolsReady === true) {
                     const sid = sessionIdOf(ctx);
                     if (sid !== undefined) headers["x-bili-plugin-conversation"] = sid;
+                    if (sid !== undefined && sid.length > 0) {
+                        state.carriedSids ??= new Set();
+                        state.carriedSids.add(sid);
+                    }
                     headers["x-bili-plugin"] = agent;
                     const window = ctx.model?.contextWindow;
                     if (typeof window === "number" && Number.isFinite(window) && window > 0) {
