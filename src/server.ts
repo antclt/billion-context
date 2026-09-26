@@ -1844,10 +1844,15 @@ async function handle(
                     session.metadata.derivedFromSessionId = parentSession.id;
                     markDirty(session);
                     log("info", `[${session.id}] [derived] linked to parent session ${parentSession.id} (conversation ${derivedParent}) — decompress/search_context fall back to it read-only (#1333)`);
-                } else {
+                } else if (session.metadata.derivedLinkMissLogged !== true) {
+                    // The relaxed gate retries resolution on EVERY request until the link
+                    // lands — cap the miss signal at one line per session per proxy
+                    // process (in-memory flag: a restart re-warns once, which is useful).
+                    session.metadata.derivedLinkMissLogged = true;
                     log("warn", `[${session.id}] [derived] parent conversation ${derivedParent} is unknown to this proxy — no inheritance; continuing fresh (#1333)`);
                 }
             } catch (err) {
+                if (session.metadata.derivedLinkMissLogged !== true) session.metadata.derivedLinkMissLogged = true;
                 log("warn", `[${session.id}] [derived] parent link from ${derivedParent} failed (${String(err)}); continuing fresh (#1333)`);
             }
         }
