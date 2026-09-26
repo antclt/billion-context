@@ -40,7 +40,7 @@ QQ群:
 
 <p align="center">
 <a href="https://claude.com/product/claude-code" title="Claude Code"><img src="https://cdn.simpleicons.org/claude/D97757" height="26" alt="Claude Code"></a>&nbsp;
-<a href="https://github.com/openai/codex" title="Codex"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ranxianglei/billion-context/master/docs/img/openai-white.svg"><img src="https://raw.githubusercontent.com/ranxianglei/billion-context/master/docs/img/openai-light.svg" height="26" alt="Codex"></picture></a>&nbsp;
+<a href="https://github.com/openai/codex" title="Codex"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.iconify.design/simple-icons/openai.svg?color=white"><img src="https://api.iconify.design/simple-icons/openai.svg" height="26" alt="Codex"></picture></a>&nbsp;
 <a href="https://opencode.ai" title="OpenCode"><picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/opencode/FFFFFF"><img src="https://cdn.simpleicons.org/opencode/000000" height="26" alt="OpenCode"></picture></a>&nbsp;
 <a href="https://pi.dev" title="pi"><picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/pi/FFFFFF"><img src="https://cdn.simpleicons.org/pi/000000" height="26" alt="pi"></picture></a>&nbsp;
 <a href="https://github.com/google-gemini/gemini-cli" title="Gemini CLI"><img src="https://cdn.simpleicons.org/googlegemini/8E75B2" height="26" alt="Gemini CLI"></a>&nbsp;
@@ -48,7 +48,18 @@ QQ群:
 <a href="https://github.com/QwenLM/qwen-code" title="Qwen Code"><img src="https://cdn.simpleicons.org/qwen/6950EF" height="26" alt="Qwen Code"></a>&nbsp;
 <a href="https://github.com/github/copilot-cli" title="GitHub Copilot CLI"><picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/githubcopilot/FFFFFF"><img src="https://cdn.simpleicons.org/githubcopilot/000000" height="26" alt="GitHub Copilot CLI"></picture></a>&nbsp;
 <a href="https://www.trae.ai" title="TRAE"><img src="https://cdn.simpleicons.org/trae/32F08C" height="26" alt="TRAE"></a>&nbsp;
-<a href="https://www.codebuddy.cn" title="CodeBuddy"><img src="https://cdn.simpleicons.org/codebuddy/6C4DFF" height="26" alt="CodeBuddy"></a>
+<a href="https://www.codebuddy.cn" title="CodeBuddy"><img src="https://cdn.simpleicons.org/codebuddy/6C4DFF" height="26" alt="CodeBuddy"></a>&nbsp;
+<a href="https://qoder.com" title="Qoder"><img src="https://icons.duckduckgo.com/ip3/qoder.com.ico" height="26" alt="Qoder"></a>&nbsp;
+<a href="https://iflow.cn" title="iFlow CLI"><img src="https://icons.duckduckgo.com/ip3/iflow.cn.ico" height="26" alt="iFlow CLI"></a>&nbsp;
+<a href="https://www.minimax.io" title="MiniMax Code (mcode)"><img src="https://cdn.simpleicons.org/minimax/E73562" height="26" alt="MiniMax Code"></a>&nbsp;
+<a href="https://www.deepseek.com" title="deepseek-harness (dsh)"><img src="https://cdn.simpleicons.org/deepseek/5786FE" height="26" alt="deepseek-harness"></a>&nbsp;
+<a href="https://ampcode.com" title="Amp"><img src="https://icons.duckduckgo.com/ip3/ampcode.com.ico" height="26" alt="Amp"></a>&nbsp;
+<a href="https://aider.chat" title="aider"><img src="https://github.com/Aider-AI.png" height="26" alt="aider"></a>&nbsp;
+<a href="https://github.com/aaif-goose/goose" title="goose"><img src="https://github.com/aaif-goose.png" height="26" alt="goose"></a>&nbsp;
+<a href="https://github.com/NousResearch/hermes-agent" title="hermes"><img src="https://github.com/NousResearch.png" height="26" alt="hermes"></a>&nbsp;
+<a href="https://z.ai" title="zcode (Z.ai)"><img src="https://github.com/zai-org.png" height="26" alt="zcode"></a>&nbsp;
+<a href="https://www.npmjs.com/package/oh-my-pi" title="omp (oh-my-pi)"><img src="https://github.com/acidsugarx.png" height="26" alt="omp"></a>&nbsp;
+<a href="https://github.com/1jehuang/jcode" title="jcode"><img src="https://github.com/1jehuang.png" height="26" alt="jcode"></a>
 </p>
 
 ---
