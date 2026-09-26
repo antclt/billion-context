@@ -296,10 +296,10 @@ function startMockUpstream(state: RelayState): http.Server {
 
 type ChatMsg = { role: string; content: string };
 
-async function chat(url: string, messages: ChatMsg[], conversation: string): Promise<string> {
+async function chat(url: string, messages: ChatMsg[], conversation: string, extraHeaders: Record<string, string> = {}): Promise<string> {
     const res = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-acp-session": conversation },
+        headers: { "content-type": "application/json", "x-acp-session": conversation, ...extraHeaders },
         body: JSON.stringify({ model: "gpt-test", stream: true, messages }),
     });
     if (!res.ok) assert.fail(`HTTP ${res.status}: ${await res.text()}`);
@@ -349,6 +349,18 @@ function proxyOpts(relayPort: number): ProxyOptions {
 }
 
 test("pi child conversation links its parent and serves its blocks read-only (#1333 e2e)", async () => {
+    // Two child wire shapes must both record the link: the anonymous shape
+    // (session header only — identity register drives binding) and the REAL
+    // pi plugin shape (x-bili-plugin + x-bili-plugin-conversation stamped by
+    // the extension — pluginAgent comes from the header, the identity branch
+    // is skipped, and the register must be consulted through the stamped
+    // conversation id instead).
+    for (const shape of ["anonymous", "stamped"] as const) {
+        await runDerivedInheritanceE2E(shape);
+    }
+});
+
+async function runDerivedInheritanceE2E(shape: "anonymous" | "stamped"): Promise<void> {
     _reset_for_test();
     _setStoreForTest(new SessionStore({ enabled: false }));
     setRegistryForTest({});
@@ -393,7 +405,11 @@ test("pi child conversation links its parent and serves its blocks read-only (#1
         // The child's FIRST request carries an EMPTY history (fresh derived
         // conversation) — it records the parent link, it does NOT copy state
         // (the kernel's syncBlocks would deactivate copied blocks anyway).
-        const childReply = await chat(url, [{ role: "user", content: `run ${run} child first turn: ${FILLER.repeat(12)}` }], childConv);
+        // The stamped shape mirrors what the real pi extension sends.
+        const childHeaders = shape === "stamped"
+            ? { "x-bili-plugin": "pi", "x-bili-plugin-conversation": childConv }
+            : {};
+        const childReply = await chat(url, [{ role: "user", content: `run ${run} child first turn (${shape}): ${FILLER.repeat(12)}` }], childConv, childHeaders);
         assert.ok(childReply.length > 0, "child turn must produce a reply");
 
         const child = newSessions().find((s) => s.id !== parent.id);
@@ -440,4 +456,4 @@ test("pi child conversation links its parent and serves its blocks read-only (#1
         await close(proxy);
         await close(relay);
     }
-});
+}

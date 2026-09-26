@@ -1776,6 +1776,20 @@ async function handle(
         }
         if (!pluginAgent && typeof session.metadata.pluginAgent === "string") pluginAgent = session.metadata.pluginAgent;
         if (pluginAgent && !pluginConversation) pluginConversation = conversation;
+        // [#1333] Real pi plugin traffic arrives pre-stamped: `x-bili-plugin`
+        // + `x-bili-plugin-conversation` (set by the extension, pi.ts:127)
+        // set pluginAgent/pluginConversation from headers above, so the
+        // identity branch never runs for it. The identity register (which
+        // carries the derived child's parentConversationId) is keyed by that
+        // same conversation id and has already landed — the extension awaits
+        // the register POST inside registerTools before the first stamped
+        // request is sent (#1214) — so consult it here too. Link-only: on
+        // non-derived conversations parentConversationId is absent and this
+        // is a no-op.
+        if (derivedParent === undefined && pluginAgent !== undefined && pluginConversation !== undefined && !anonAffinity) {
+            const stamped = consumePluginRegisterFor(pluginConversation);
+            if (stamped?.parentConversationId !== undefined) derivedParent = stamped.parentConversationId;
+        }
         if (pluginAgent) {
             if (session.metadata.pluginAgent !== pluginAgent) session.metadata.pluginAgent = pluginAgent;
             // #970: for a split subagent session, record it under its split
@@ -1819,7 +1833,10 @@ async function handle(
         // child's wire, so seeding blocks into an empty-history child never
         // sticks. Instead decompress/search_context fall back to the linked
         // parent chain at read time (src/decompress-shared.ts, depth cap 8).
-        if (derivedParent !== undefined && session.stats.requests === 0 && session.metadata.derivedFromSessionId === undefined) {
+        // Late binding is harmless (the link copies nothing at link time), so
+        // the gate is idempotence, not first-request: a request that raced the
+        // register POST can still pick the link up on a later turn.
+        if (derivedParent !== undefined && session.metadata.derivedFromSessionId === undefined) {
             try {
                 const parentSession = resolveConversation(derivedParent)?.session;
                 if (parentSession) {
