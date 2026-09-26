@@ -5,7 +5,7 @@ import type { ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { acquireInFlight, effectiveConfig, findSessionByCanonicalId, listSessions, markCompactionBoundary, markDirty, peekSession, releaseInFlight, withSessionLock, type Session } from "./session.js";
-import { ABSORB_TOOL, ABSORB_TOOL_NAME, ABSORB_TOOL_OPENAI, ABSORB_TOOL_RESPONSES, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_CONVERSATION_ID_PARAM, SEARCH_CONTEXT_TOOL_NAME, retrieveToolsFor } from "./compress-tool.js";
+import { ABSORB_TOOL_NAME, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_CONVERSATION_ID_PARAM, SEARCH_CONTEXT_TOOL_NAME, absorbToolsFor, retrieveToolsFor } from "./compress-tool.js";
 import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.js";
 import { effectiveRulesConfig, rulesEnabled } from "./rules-feature.js";
 import { executeProxyTool } from "./loop/core.js";
@@ -560,7 +560,11 @@ export function handlePluginManifest(res: import("node:http").ServerResponse, co
     // per-request provider/model overrides may still differ (conservative: the
     // manifest never advertises what the base config disables) and per-session
     // enablement stays enforced at execution (isProxyToolFor / executeProxyTool).
+    // #1359: the advertised name is the base-config toolName, matching the
+    // plugin-lane gate (which adjudicates the same base block).
     const absorbOn = absorbEnabled(config);
+    const absorbName = config.absorb?.toolName ?? ABSORB_TOOL_NAME;
+    const absorbTools = absorbOn ? absorbToolsFor(absorbName) : undefined;
     const rulesOn = rulesEnabled(config);
     // [#1271] acp_retrieve is advertised only while the base config enables CCR (same
     // #1192 conservative rule as absorb/acp_rule). The proxy wires it on the anthropic/
@@ -575,11 +579,11 @@ export function handlePluginManifest(res: import("node:http").ServerResponse, co
         protocolVersion: PLUGIN_PROTOCOL_VERSION,
         proxy: "billion-context",
         version: VERSION,
-        toolNames: [...PROXY_TOOL_NAMES, ...(absorbOn ? [ABSORB_TOOL_NAME] : []), ...(rulesOn ? [RULE_TOOL_NAME] : []), ...(ccrOn ? [ccrName] : [])],
+        toolNames: [...PROXY_TOOL_NAMES, ...(absorbTools ? [absorbName] : []), ...(rulesOn ? [RULE_TOOL_NAME] : []), ...(ccrOn ? [ccrName] : [])],
         tools: {
-            anthropic: withSearchContextConversationDescription([...BILI_ACP_TOOLS_ANTHROPIC, ...(absorbOn ? [ABSORB_TOOL] : []), ...(rulesOn ? [RULE_TOOL] : []), ...(ccrTools ? [ccrTools.anthropic] : [])].map(withConversationIdParam)),
-            openai: withSearchContextConversationDescription([...BILI_ACP_TOOLS_OPENAI, ...(absorbOn ? [ABSORB_TOOL_OPENAI] : []), ...(rulesOn ? [RULE_TOOL_OPENAI] : []), ...(ccrTools ? [ccrTools.openai] : [])].map(withConversationIdParam)),
-            responses: withSearchContextConversationDescription([...BILI_ACP_TOOLS_RESPONSES, ...(absorbOn ? [ABSORB_TOOL_RESPONSES] : []), ...(rulesOn ? [RULE_TOOL_RESPONSES] : [])].map(withConversationIdParam)),
+            anthropic: withSearchContextConversationDescription([...BILI_ACP_TOOLS_ANTHROPIC, ...(absorbTools ? [absorbTools.anthropic] : []), ...(rulesOn ? [RULE_TOOL] : []), ...(ccrTools ? [ccrTools.anthropic] : [])].map(withConversationIdParam)),
+            openai: withSearchContextConversationDescription([...BILI_ACP_TOOLS_OPENAI, ...(absorbTools ? [absorbTools.openai] : []), ...(rulesOn ? [RULE_TOOL_OPENAI] : []), ...(ccrTools ? [ccrTools.openai] : [])].map(withConversationIdParam)),
+            responses: withSearchContextConversationDescription([...BILI_ACP_TOOLS_RESPONSES, ...(absorbTools ? [absorbTools.responses] : []), ...(rulesOn ? [RULE_TOOL_RESPONSES] : [])].map(withConversationIdParam)),
         },
         headers: { agent: PLUGIN_AGENT_HEADER, conversation: PLUGIN_CONVERSATION_HEADER, contextWindow: PLUGIN_CONTEXT_WINDOW_HEADER, maxOutput: PLUGIN_MAX_OUTPUT_HEADER, model: PLUGIN_MODEL_HEADER, instructionsMutable: PLUGIN_INSTRUCTIONS_MUTABLE_HEADER },
         toolEndpoint: "/__bili/plugin/tool",
