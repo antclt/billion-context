@@ -45,7 +45,7 @@ import {
     subagentNamespace,
 } from "acp-kernel/wire";
 import { responsesToCoreWithToolImages as responsesToCore, patchResponsesInputWithToolImages as patchResponsesInput } from "./responses-tool-output.js";
-import { getSession, hasProcessedState, listSessions, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, withSessionLock, markNativeCompactionBoundary, reconcileNativeCompactionBoundary, snapshotMessages, applyCompactionArchive, detectUnannouncedHistoryRewrite, markCompactionBoundary, ensureCanonicalId, storeEffectiveConfig } from "./session.js";
+import { getSession, hasProcessedState, listSessions, type PendingRetrieval, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, withSessionLock, markNativeCompactionBoundary, reconcileNativeCompactionBoundary, snapshotMessages, applyCompactionArchive, detectUnannouncedHistoryRewrite, markCompactionBoundary, ensureCanonicalId, storeEffectiveConfig } from "./session.js";
 import { detectStaleInstall } from "./update.js";
 import { PACKAGE_NAME, VERSION } from "./version.js";
 import {
@@ -62,7 +62,7 @@ import {
 } from "acp-kernel/wire";
 import { ABSORB_TOOL_NAME, COMPRESS_TOOL, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_GOOGLE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_RESPONSES, BILI_ACP_READONLY_TOOLS_RESPONSES, COMPRESS_TOOL_NAME, IMAGE_FULL_TOOL, IMAGE_FULL_TOOL_GOOGLE, IMAGE_FULL_TOOL_OPENAI, IMAGE_FULL_TOOL_RESPONSES, RULE_TOOL, RULE_TOOL_GOOGLE, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, absorbToolsFor, retrieveToolsFor, buildAbsorbSystemPrompt, buildCompressSystemPrompt, buildCompressHybridSystemPrompt, withConversationIdNote, withMarkerIntegrityNote, withStagedCompressGuidance, withSummaryBudgetNote } from "./compress-tool.js";
 import { applyAbsorbView, absorbEnabled, absorbToolName, storeEffectiveAbsorb } from "./absorb.js";
-import { adoptContentStore, ccrEnabled, ccrPluginWireOk, contentStoreOf, drainPendingRetrievals, executeRetrieve, retrieveToolName, storeEffectiveCcr, type CcrSettings } from "./store.js";
+import { adoptContentStore, ccrEnabled, ccrPluginWireOk, commitRetrievals, contentStoreOf, dropRetrievals, executeRetrieve, flushRetrievalNotes, pruneExpiredRetrievals, reconcileReloadedRetrievals, retrieveToolName, snapshotPendingRetrievals, storeEffectiveCcr, type CcrSettings } from "./store.js";
 import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
 import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
@@ -732,6 +732,11 @@ type Prepared = {
      *  as trailing user messages so compress-loop rounds see the same
      *  updated-instructions context the main request did. */
     systemNotes?: string[];
+    /** [#1343] Plugin-lane retrievals snapshotted onto THIS request's body.
+     *  Carried so forward() commits them on upstream success or drops them
+     *  (logged + corrective note) on failure — the ack is already out, so the
+     *  full text must never vanish silently. */
+    attachedRetrievals?: PendingRetrieval[];
     nudge?: NudgeDecision;
     /** Render strategy the prepare used for processTurn ("none" for codex
      *  compaction triggers / ACP_RENDER_NONE). The #422 fold-refresh hook in
@@ -2627,6 +2632,7 @@ async function prepareAnthropic(
     }
 
     let processedMessages: CoreMessage[] = [];
+    let attachedRetrievals: PendingRetrieval[] = [];
     let originalMessages: CoreMessage[] = [];
     let nudge: NudgeDecision | undefined;
     let rebuiltMessages = parsed.messages;
@@ -2752,11 +2758,14 @@ async function prepareAnthropic(
         // decision + recipe; originals cached for the image_full restore channel).
         // Deterministic encode ⇒ re-runs are byte-stable for the prefix cache.
         await applyImageCompressionPass(session, processedMessages as BiliMessage[], { config, billing: imageBillingFor(opts, upstreamOrigin), log });
-        // [#1271] plugin mode: acp_retrieve ran via the tool API; ride the full original
-        // back on this forward as a request-only trailing message (ephemeral, never persisted).
+        // [#1271/#1343] plugin mode: acp_retrieve already acked via the tool API; snapshot
+        // the queued full text onto THIS forward (stays in the queue until commit/drop, so an
+        // upstream failure drops-and-logs it instead of vanishing it).
         if (pluginMode && ccrEnabled(session)) {
-            const retrInj = drainPendingRetrievals(session);
-            if (retrInj.length > 0) processedMessages = [...processedMessages, ...retrInj];
+            reconcileReloadedRetrievals(session);
+            pruneExpiredRetrievals(session);
+            attachedRetrievals = snapshotPendingRetrievals(session);
+            if (attachedRetrievals.length > 0) processedMessages = [...processedMessages, ...attachedRetrievals.map((i) => i.injection)];
         }
         rebuiltMessages = coreToAnthropic(processedMessages as BiliMessage[], cacheControls);
         if (sysNotes.length > 0) {
@@ -2787,8 +2796,13 @@ async function prepareAnthropic(
         // (see prepareAnthropic for why not system).
         const imgNote = imageFullTrailingNote(session);
         if (imgNote) rebuiltMessages = [...rebuiltMessages, { role: "user", content: imgNote }];
+        // [#1343] surface any earlier undelivered retrieve as an ephemeral trailing
+        // user note (kept last so it never reorders cached messages).
+        const retrNote = flushRetrievalNotes(session);
+        if (retrNote) rebuiltMessages = [...rebuiltMessages, { role: "user", content: retrNote }];
     } catch (err) {
         log("warn", `[${sessionId}] kernel transform failed, forwarding unchanged: ${String(err)}`);
+        if (attachedRetrievals.length > 0) dropRetrievals(session, attachedRetrievals.map((i) => i.ref), "prepare failed; forwarded unprocessed");
         processedMessages = [];
     }
     // #532: measure the outbound system+tools overhead for the status panel's
@@ -2814,7 +2828,7 @@ async function prepareAnthropic(
     session.stats.localInputEstimate = estimateCoreMessagesUpper(processedMessages.length > 0 ? processedMessages : originalMessages)
         + countSystemAndToolsTokens(extractSystem(systemOut), toolsOut)
         + imageTokensInParsedBody("anthropic", rebuilt, imageBillingFor(opts, upstreamOrigin));
-    return { body: JSON.stringify(rebuilt), session, processedMessages, originalMessages, anthropicSystem: parsed.system, systemNotes: sysNotes, protocol: "anthropic", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only" } as Prepared;
+    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, processedMessages, originalMessages, anthropicSystem: parsed.system, systemNotes: sysNotes, protocol: "anthropic", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only" } as Prepared;
 }
 
 async function prepareOpenai(
@@ -2842,6 +2856,7 @@ async function prepareOpenai(
     const stripReasoning = (msgs: BiliMessage[]): BiliMessage[] => withReasoningDrop(msgs, reasoning, log, sessionId, isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)));
     let openaiOutboundSystem: string | undefined;
     let processedMessages: CoreMessage[] = [];
+    let attachedRetrievals: PendingRetrieval[] = [];
     let originalMessages: CoreMessage[] = [];
     let nudge: NudgeDecision | undefined;
     let rebuiltMessages = parsed.messages;
@@ -2938,11 +2953,14 @@ async function prepareOpenai(
         // [#1095] arrival-time image downscale (see prepareAnthropic) — one
         // deterministic encode per fingerprint; byte-stable re-runs.
         await applyImageCompressionPass(session, processedMessages as BiliMessage[], { config, billing: imageBillingFor(opts, billingUpstream ?? upstreamOrigin), log });
-        // [#1271] plugin mode: acp_retrieve ran via the tool API; ride the full original
-        // back on this forward as a request-only trailing message (ephemeral, never persisted).
+        // [#1271/#1343] plugin mode: acp_retrieve already acked via the tool API; snapshot
+        // the queued full text onto THIS forward (stays in the queue until commit/drop, so an
+        // upstream failure drops-and-logs it instead of vanishing it).
         if (pluginMode && ccrEnabled(session)) {
-            const retrInj = drainPendingRetrievals(session);
-            if (retrInj.length > 0) processedMessages = [...processedMessages, ...retrInj];
+            reconcileReloadedRetrievals(session);
+            pruneExpiredRetrievals(session);
+            attachedRetrievals = snapshotPendingRetrievals(session);
+            if (attachedRetrievals.length > 0) processedMessages = [...processedMessages, ...attachedRetrievals.map((i) => i.injection)];
         }
         rebuiltMessages = systemToUser(hardenOpenaiAssistantContent(coreToOpenai(processedMessages as BiliMessage[])));
 
@@ -2987,8 +3005,13 @@ async function prepareOpenai(
         // (same pattern as prepareAnthropic/Google/Responses).
         const imgNote = imageFullTrailingNote(session);
         if (imgNote) rebuiltMessages = [...rebuiltMessages, { role: "user", content: imgNote }];
+        // [#1343] surface any earlier undelivered retrieve as an ephemeral trailing
+        // user note (kept last so it never reorders cached messages).
+        const retrNote = flushRetrievalNotes(session);
+        if (retrNote) rebuiltMessages = [...rebuiltMessages, { role: "user", content: retrNote }];
     } catch (err) {
         log("warn", `[${sessionId}] kernel transform failed, forwarding unchanged: ${String(err)}`);
+        if (attachedRetrievals.length > 0) dropRetrievals(session, attachedRetrievals.map((i) => i.ref), "prepare failed; forwarded unprocessed");
         processedMessages = [];
     }
 
@@ -3031,7 +3054,7 @@ async function prepareOpenai(
     }
     snapshotMessages(session, originalMessages);
     markDirty(session);
-    return { body: JSON.stringify(rebuilt), session, processedMessages, originalMessages, protocol: "openai", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, openaiSystemText, systemNotes: sysNotes, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only" } as Prepared;
+    return { body: JSON.stringify(rebuilt), session, attachedRetrievals, processedMessages, originalMessages, protocol: "openai", stream, compressInjected: injectTools, pluginMode, nudge, prompts, surface, openaiSystemText, systemNotes: sysNotes, renderTags: process.env.ACP_RENDER_NONE ? "none" : "text-only" } as Prepared;
 }
 
 /** Append the ephemeral nudge to a Gemini `contents` array. Gemini is
@@ -4572,6 +4595,9 @@ async function forward(
         // #604: a network-level failure (socket reset, timeout abort) also never
         // reports usage — arm the emergency shrink like the 5xx branch below.
         if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure");
+        // [#1343] no response means the attached full text never reached the model —
+        // drop-and-log it (a corrective note surfaces on the next qualifying request).
+        if (prepared && prepared.attachedRetrievals && prepared.attachedRetrievals.length > 0) dropRetrievals(prepared.session, prepared.attachedRetrievals.map((i) => i.ref), "upstream network failure");
         throw new Error(`upstream request failed: ${formatUpstreamError(error, upstreamUrl, proxyUrl)}`, { cause: error });
     }
     // #552 learn-on-failure: a converting upstream that rejects a role (codex
@@ -4799,6 +4825,14 @@ async function forward(
         }
     }
     const { response: upstream, clearTimer: clearUpstreamTimer } = upstreamResult;
+    // [#1343] delivery decided: the attached full text rode THIS request's body, so settle
+    // its lifecycle here — delivered on a 2xx, dropped-and-logged otherwise. The ack is
+    // already out to the agent, so a failure must be observable + correctable, not silent.
+    if (prepared && prepared.attachedRetrievals && prepared.attachedRetrievals.length > 0) {
+        const aRefs = prepared.attachedRetrievals.map((i) => i.ref);
+        if (upstream.ok) commitRetrievals(prepared.session, aRefs);
+        else dropRetrievals(prepared.session, aRefs, `upstream HTTP ${upstream.status}`);
+    }
     const respHeaders: Record<string, string> = {};
     const respConnNamed = connectionNamedHeaders(upstream.headers.get("connection") ?? undefined);
     upstream.headers.forEach((v, k) => {

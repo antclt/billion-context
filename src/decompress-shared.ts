@@ -293,8 +293,8 @@ function resolveDecompressRange(args: Record<string, unknown>, ctx: ProxyToolCtx
     // is deterministic, so dedupe on it — retries re-ack without queueing a
     // duplicate full-text message or inflating rangeRestores.
     const injId = retrievedMessageId(`range_${block.blockId}_${startRaw}-${endRaw}`);
-    if (!ctx.session.pendingRetrievals.some((p) => p.id === injId)) {
-        ctx.session.pendingRetrievals.push({ id: injId, role: "system", contentType: "text", text: injText });
+    if (!ctx.session.pendingRetrievals.some((p) => p.ref === injId)) {
+        ctx.session.pendingRetrievals.push({ ref: injId, tokens: 0, chars: body.length, queuedAt: Date.now(), ccr: false, injection: { id: injId, role: "system", contentType: "text", text: injText } });
         ctx.session.stats.rangeRestores = (ctx.session.stats.rangeRestores ?? 0) + 1;
     }
     markDirty(ctx.session);
