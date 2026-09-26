@@ -3,9 +3,10 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-面向所有主流编程助手的<strong>上下文压缩插件</strong> —— pi、OpenCode、Codex、Claude Code 等
-<br />
-兼顾小窗口(100k 上下文足矣)、<em>省 5 倍 token</em>、超长会话(十亿级别单会话)、压缩质量。<em>billion-context is all you need。</em>
+<strong>上下文压缩插件</strong><br/>
+小窗口（100k 上下文足矣）· <em>省 5 倍 token</em> · 超长会话（十亿级别单会话）· 高压缩质量<br/>
+<sub>面向所有主流编程助手：pi · OpenCode · Codex · Claude Code 等</sub><br/>
+<strong><em>billion-context is all you need。</em></strong>
 </p>
 
 ---
