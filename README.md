@@ -405,7 +405,7 @@ bili codex                            # launch codex through the proxy
 bili claude                           # launch claude through the proxy
 bili omp                              # pi-style, file-free (#535): env + extension registerProvider + compaction cancel, real ~/.omp untouched
 bili opencode                         # OpenCode (1.x & 2.x): full guide in the [OpenCode](#opencode) section below
-bili hermes                           # file-free (#535): hermes proxy env (HTTPS_PROXY + HERMES_CA_BUNDLE) — https via CONNECT MITM, http via absolute-form forward proxy; real ~/.hermes untouched
+bili hermes                           # file-free (#535): hermes proxy env (HTTPS_PROXY + combined CA bundle via SSL_CERT_FILE) — https via CONNECT MITM, http via absolute-form forward proxy; real ~/.hermes untouched
 bili dsh                              # deepseek-harness: full native plugin injected via --patch (#941) — compress/decompress/acp_status registered as real dsh tools, requests stamped with the dsh session id (plugin mode), /acp + /acp-cache session-bound; non-loopback upstreams ride proxy envs (https MITM, http absolute-form), loopback keeps the overlay DSH_HOME (~/.dsh-bili) rewrite (#535), built-in deepseek route via DEEPSEEK_BASE_URL; dsh native auto-compaction disabled (compaction-basic auto:false)
 bili codebuddy                        # Tencent CodeBuddy Code CLI: CODEBUDDY_BASE_URL /bili/ rewrite (OpenAI chat completions wire), budget aligned via CODEBUDDY_AUTO_COMPACT_WINDOW; real ~/.codebuddy untouched
 bili qoder                            # qoder: model endpoint is hardcoded https (no /bili/ rewrite possible) — cert-MITM via HTTPS_PROXY + NODE_EXTRA_CA_CERTS, default model hosts whitelisted (#653)
@@ -608,8 +608,9 @@ pure-stdlib Python module shipped inside the npm package:
   hermes exits; concurrent starts arbitrate through the same starting-marker
   protocol the launcher uses). Only once the proxy is verified healthy does it
   point hermes' httpx stack at it via `HTTPS_PROXY` / `https_proxy` +
-  `HERMES_CA_BUNDLE` (bili's root CA) — `~/.hermes/config.yaml` is never
-  touched. Provider https hosts are read from hermes' config and whitelisted
+  `SSL_CERT_FILE` (bili's combined CA bundle — current hermes resolves ambient
+  trust there; `HERMES_CA_BUNDLE` stays set for older builds) —
+  `~/.hermes/config.yaml` is never touched. Provider https hosts are read from hermes' config and whitelisted
   for MITM; everything else blind-tunnels exactly like launcher mode. If no
   proxy can be made healthy, the plugin stands down silently and traffic goes
   direct (no compression, no dead port).
