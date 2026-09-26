@@ -536,14 +536,43 @@ export function applyClaudeManagedBlock(settings: Record<string, unknown>, opts:
 
     const hooks = (data.hooks !== null && typeof data.hooks === "object" && !Array.isArray(data.hooks) ? data.hooks : {}) as Record<string, unknown>;
     const sessionStart = Array.isArray(hooks.SessionStart) ? hooks.SessionStart : [];
-    const carriesOurs = sessionStart.some(isOursSessionStartEntry);
-    if (!carriesOurs) {
+    if (!sessionStart.some(isOursSessionStartEntry)) {
         sessionStart.push({ hooks: [{ type: "command", command: opts.hookCommand }] });
         hooks.SessionStart = sessionStart;
         data.hooks = hooks;
         notes.push("hooks.SessionStart += bili proxy bootstrap");
+    } else if (refreshOurHookCommands(sessionStart, opts.hookCommand)) {
+        data.hooks = hooks;
+        notes.push("hooks.SessionStart refreshed to the current hook command");
     }
     return { data, notes };
+}
+
+/** A hook command naming our bootstrap script. Match on the script name
+ *  rather than the whole string: the emitted form changes across releases. */
+function isOurHookCommand(command: unknown): command is string {
+    return typeof command === "string" && /claude-native-bootstrap\.(?:js|mjs|ts)["']?$/.test(command);
+}
+
+/** Rewrite every hook command we own to `command`, in place; true if any
+ *  changed. The entry above is appended only when no bili entry is present,
+ *  so without this a settings file written by an older release keeps its old
+ *  command forever — and a command a client shell cannot run hangs every
+ *  session with no log to say why. */
+function refreshOurHookCommands(sessionStart: unknown[], command: string): boolean {
+    let changed = false;
+    for (const entry of sessionStart) {
+        if (!isOursSessionStartEntry(entry)) continue;
+        for (const h of (entry as { hooks: unknown[] }).hooks) {
+            const hook = h as { command?: unknown };
+            const cur = hook.command;
+            if (isOurHookCommand(cur) && cur !== command) {
+                hook.command = command;
+                changed = true;
+            }
+        }
+    }
+    return changed;
 }
 
 /** A SessionStart entry we wrote: any hook command naming our bootstrap
@@ -551,9 +580,7 @@ export function applyClaudeManagedBlock(settings: Record<string, unknown>, opts:
 export function isOursSessionStartEntry(entry: unknown): boolean {
     const hooks = (entry !== null && typeof entry === "object" && !Array.isArray(entry) ? (entry as { hooks?: unknown }).hooks : undefined);
     if (!Array.isArray(hooks)) return false;
-    return hooks.some(
-        (h) => h !== null && typeof h === "object" && typeof (h as { command?: unknown }).command === "string" && /claude-native-bootstrap\.(?:js|mjs|ts)["']?$/.test((h as { command: string }).command),
-    );
+    return hooks.some((h) => h !== null && typeof h === "object" && isOurHookCommand((h as { command?: unknown }).command));
 }
 
 /** Pure strip of the managed block (remove path) — returns the cleaned copy

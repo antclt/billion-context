@@ -78,15 +78,32 @@ test("applyClaudeManagedBlock: never clobbers foreign keys", () => {
     assert.ok(notes.some((n) => n.includes("foreign value") || n.includes("left untouched")));
 });
 
-test("applyClaudeManagedBlock: preserves user SessionStart entries", () => {
+test("applyClaudeManagedBlock: preserves user SessionStart entries, refreshes ours", () => {
     const userEntry = { matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] };
     const first = applyClaudeManagedBlock({ hooks: { SessionStart: [userEntry] } }, { baseUrl: baseUrlForPort(48787), hookCommand: HOOK_COMMAND });
     const entries = (first.data.hooks as Record<string, unknown[]>).SessionStart;
     assert.equal(entries.length, 2);
     assert.deepEqual(entries[0], userEntry);
     const again = applyClaudeManagedBlock(first.data, { baseUrl: baseUrlForPort(48787), hookCommand: "/moved/dist/claude-native-bootstrap.js" });
-    assert.equal((again.data.hooks as Record<string, unknown[]>).SessionStart.length, 2, "old-path entry still counts as ours");
-    assert.equal(again.notes.length, 0);
+    const after = (again.data.hooks as Record<string, unknown[]>).SessionStart;
+    assert.equal(after.length, 2, "old-path entry still counts as ours — no duplicate appended");
+    assert.deepEqual(after[0], userEntry, "user entry untouched");
+    assert.deepEqual((after[1] as { hooks: Array<{ command: string }> }).hooks, [{ type: "command", command: "/moved/dist/claude-native-bootstrap.js" }]);
+    assert.equal(again.notes.length, 1);
+});
+
+test("applyClaudeManagedBlock: rewrites a stale hook command in place (#1376)", () => {
+    // 0.1.153 on Windows wrote a backslash path plus JSON.stringify quotes;
+    // PowerShell mangles that, so the proxy never starts and every session
+    // hangs with nothing in the log. Reinstalling after the fix has to repair
+    // the settings file the old release left behind.
+    const stale = { hooks: [{ type: "command", command: 'D:\\Dev\\node\\node.exe "D:\\bili\\dist\\claude-native-bootstrap.js"' }] };
+    const current = "D:/Dev/node/node.exe D:/bili/dist/claude-native-bootstrap.js";
+    const { data, notes } = applyClaudeManagedBlock({ hooks: { SessionStart: [stale] } }, { baseUrl: baseUrlForPort(48787), hookCommand: current });
+    const entries = (data.hooks as Record<string, unknown[]>).SessionStart;
+    assert.equal(entries.length, 1);
+    assert.deepEqual((entries[0] as { hooks: Array<{ command: string }> }).hooks, [{ type: "command", command: current }]);
+    assert.ok(notes.some((n) => n.includes("refreshed")));
 });
 
 test("stripClaudeManagedBlock: round-trip removes ours, keeps user keys", () => {
