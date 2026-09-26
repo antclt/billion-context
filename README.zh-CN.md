@@ -1,32 +1,10 @@
 # billion-context
 
-[English](./README.md) | [中文](./README.zh-CN.md)
+<p align="center"><a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a></p>
 
-<p align="center">
-<strong>上下文压缩插件</strong><br/>
-小窗口（100k 上下文足矣）· <em>省 5 倍 token</em> · 超长会话（十亿级别单会话）· 高压缩质量<br/>
-<strong><em>billion-context is all you need。</em></strong>
-</p>
+<p align="center"><strong>上下文压缩插件</strong> — <em>billion-context is all you need。</em></p>
 
----
-
-## 社区
-
-QQ群:
-1056132097(已满)
-1108730198(未满)
-
----
-
-## 📄 论文 / 预印本
-
-- **[模型驱动的分层增量压缩:面向长寿命编码 Agent 的免训练多代上下文管理](./paper/模型驱动的分层增量压缩-免训练多代上下文管理.md)**(中文版,v0.2)
-
-> 📝 **论文本身与代码一同以 MIT 许可开源(位于 `paper/` 目录),是代码库的一部分 —— 这是一份活文档,任何人都可以编辑,欢迎提 PR 改进。**
-
-生产规模纵向研究:四个半月、三宿主、174,327 次模型调用、187.6 亿累计输入 token(三宿主合计约 247 亿),204,800-token 窗口零违规,马拉松会话 8,584–12,049 次调用。
-
----
+<p align="center"><sub>小窗口（100k 上下文足矣）· <em>省 5 倍 token</em> · 超长会话（十亿级别单会话）· 高压缩质量</sub></p>
 
 <p align="center">
 <a href="https://www.npmjs.com/package/billion-context"><img src="https://img.shields.io/npm/v/billion-context.svg?style=flat-square" alt="npm"></a>
@@ -61,6 +39,24 @@ QQ群:
 <a href="https://omp.sh" title="omp (oh-my-pi, Stencil Labs)"><img src="https://omp.sh/favicon.svg" height="26" alt="omp"></a>&nbsp;
 <a href="https://github.com/1jehuang/jcode" title="jcode"><img src="https://github.com/1jehuang.png" height="26" alt="jcode"></a>
 </p>
+
+---
+
+## 社区
+
+QQ群:
+1056132097(已满)
+1108730198(未满)
+
+---
+
+## 📄 论文 / 预印本
+
+- **[模型驱动的分层增量压缩:面向长寿命编码 Agent 的免训练多代上下文管理](./paper/模型驱动的分层增量压缩-免训练多代上下文管理.md)**(中文版,v0.2)
+
+> 📝 **论文本身与代码一同以 MIT 许可开源(位于 `paper/` 目录),是代码库的一部分 —— 这是一份活文档,任何人都可以编辑,欢迎提 PR 改进。**
+
+生产规模纵向研究:四个半月、三宿主、174,327 次模型调用、187.6 亿累计输入 token(三宿主合计约 247 亿),204,800-token 窗口零违规,马拉松会话 8,584–12,049 次调用。
 
 ---
 
